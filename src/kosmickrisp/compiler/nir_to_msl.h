@@ -10,9 +10,19 @@
 
 enum pipe_format;
 
+struct nir_to_msl_options {
+   void *mem_ctx;
+   uint64_t disabled_workarounds;
+
+   /* Required to correctly declare fragment outputs. Shader may contain
+    * shrinked writes which can lead to writting less components than the ones
+    * the render target has. This leads to an incorrect calculation of the
+    * component count for the render target formats. */
+   uint8_t rts_component_count[MAX_DRAW_BUFFERS];
+};
+
 /* Assumes nir_shader_gather_info has been called beforehand. */
-char *nir_to_msl(nir_shader *shader, void *mem_ctx,
-                 uint64_t disabled_workarounds);
+char *nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options);
 
 /* Call this after all API-specific lowerings. It will bring the NIR out of SSA
  * at the end */
@@ -31,6 +41,10 @@ enum msl_tex_access_flag {
 static inline enum msl_tex_access_flag
 msl_convert_access_flag(enum gl_access_qualifier qual)
 {
+   enum gl_access_qualifier readwrite =
+      (ACCESS_NON_WRITEABLE | ACCESS_NON_READABLE);
+   if ((qual & readwrite) == readwrite)
+      return MSL_ACCESS_READ_WRITE;
    if (qual & ACCESS_NON_WRITEABLE)
       return MSL_ACCESS_READ;
    if (qual & ACCESS_NON_READABLE)
@@ -56,4 +70,5 @@ bool msl_ensure_vertex_position_output(nir_shader *nir);
 bool msl_nir_fs_io_types(nir_shader *nir);
 bool msl_nir_vs_io_types(nir_shader *nir);
 bool msl_nir_fake_guard_for_discards(struct nir_shader *nir);
+bool msl_nir_lower_sample_shading(nir_shader *nir);
 void msl_lower_nir_late(nir_shader *nir);

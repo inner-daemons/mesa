@@ -1,25 +1,6 @@
 /*
  * Copyright (C) 2025 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "pan_compiler.h"
@@ -32,6 +13,24 @@
 #include "midgard/midgard_compile.h"
 
 #include "panfrost/model/pan_model.h"
+
+bool
+pan_will_dump_shaders(unsigned arch)
+{
+   if (arch >= 6)
+      return bifrost_will_dump_shaders();
+   else
+      return midgard_will_dump_shaders();
+}
+
+bool
+pan_want_debug_info(unsigned arch)
+{
+   if (arch >= 6)
+      return bifrost_want_debug_info();
+   else
+      return false;
+}
 
 const nir_shader_compiler_options *
 pan_get_nir_shader_compiler_options(unsigned arch)
@@ -103,7 +102,8 @@ pan_nir_lower_texture_late(nir_shader *nir, unsigned gpu_id)
 {
    /* This must be called after any lowering of resource indices
     * (panfrost_nir_lower_res_indices / panvk_per_arch(nir_lower_descriptors))
-    */
+    * and lowering of attribute indices (pan_nir_lower_image_index /
+    * pan_nir_lower_texel_buffer_fetch_index)  */
    if (pan_arch(gpu_id) >= 6)
       bifrost_lower_texture_late_nir(nir, gpu_id);
 }
@@ -197,16 +197,6 @@ pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
       info->vs.needs_extended_fifo = arch >= 9 &&
          valhal_writes_extended_fifo(s->info.outputs_written,
                                      true, inputs->view_mask != 0);
-
-      if (arch >= 9) {
-         info->varyings.output_count =
-            util_last_bit(s->info.outputs_written >> VARYING_SLOT_VAR0);
-
-         /* Store the mask of special varyings, in case we need to emit ADs
-          * later. */
-         info->varyings.fixed_varyings =
-            pan_get_fixed_varying_mask(s->info.outputs_written);
-      }
       break;
    case MESA_SHADER_FRAGMENT:
       if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
@@ -255,15 +245,6 @@ pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
       info->fs.reads_face =
          (s->info.inputs_read & VARYING_BIT_FACE) ||
          BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_FRONT_FACE);
-      if (arch >= 9) {
-         info->varyings.input_count =
-            util_last_bit(s->info.inputs_read >> VARYING_SLOT_VAR0);
-
-         /* Store the mask of special varyings, in case we need to emit ADs
-          * later. */
-         info->varyings.fixed_varyings =
-            pan_get_fixed_varying_mask(s->info.inputs_read);
-      }
       break;
    default:
       /* Everything else treated as compute */
@@ -272,7 +253,11 @@ pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
    }
 
    info->outputs_written = s->info.outputs_written;
+   info->images_used =
+      s->info.images_used[0] | ((uint64_t)s->info.images_used[1]) << 32;
    info->attribute_count += BITSET_LAST_BIT(s->info.images_used);
+   if (arch >= 6 && arch < 9)
+      info->attribute_count += BITSET_LAST_BIT(s->info.texture_buffers);
    info->writes_global = s->info.writes_memory;
    info->ubo_count = s->info.num_ubos;
 

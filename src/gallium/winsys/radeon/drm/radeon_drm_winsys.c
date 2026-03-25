@@ -465,13 +465,13 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
                4 << ((tiling_config & 0xf0) >> 4) :
                     4 << ((tiling_config & 0x30) >> 4);
 
-      ws->info.pipe_interleave_bytes =
+      ws->info.r600_pipe_interleave_bytes =
             ws->info.gfx_level >= EVERGREEN ?
                256 << ((tiling_config & 0xf00) >> 8) :
                       256 << ((tiling_config & 0xc0) >> 6);
 
-      if (!ws->info.pipe_interleave_bytes)
-         ws->info.pipe_interleave_bytes =
+      if (!ws->info.r600_pipe_interleave_bytes)
+         ws->info.r600_pipe_interleave_bytes =
                ws->info.gfx_level >= EVERGREEN ? 512 : 256;
 
       radeon_get_drm_value(ws->fd, RADEON_INFO_NUM_TILE_PIPES, NULL,
@@ -632,7 +632,6 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
    ws->info.max_alignment = 1024*1024;
    ws->info.has_graphics = true;
    ws->info.cpdma_prefetch_writes_memory = true;
-   ws->info.has_3d_cube_border_color_mipmap = true;
    ws->info.has_image_opcodes = true;
    ws->info.spi_cu_en_has_effect = false;
    ws->info.spi_cu_en = 0xffff;
@@ -644,7 +643,7 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
    ws->info.lds_size_per_workgroup = ws->info.gfx_level == GFX7 ? 64 * 1024 : 32 * 1024;
 
 #ifdef HAVE_GALLIUM_RADEONSI
-   ac_fill_cu_info(&ws->info, NULL);
+   ac_fill_compiler_info(&ws->info, NULL);
 #endif
 
    for (unsigned se = 0; se < ws->info.max_se; se++) {

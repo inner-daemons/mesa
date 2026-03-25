@@ -42,6 +42,18 @@ valid_sample_count(unsigned sample_count, bool is_suboptimal)
 }
 
 static bool
+is_cl_supported(const struct fd_dev_info *info, enum pipe_format format)
+{
+   if (info->chip >= A8XX) {
+      unsigned b = util_format_get_component_bits(
+         format, UTIL_FORMAT_COLORSPACE_RGB, PIPE_SWIZZLE_W);
+      if (b == 2)
+         return false;
+   }
+   return true;
+}
+
+static bool
 fd6_screen_is_format_supported(struct pipe_screen *pscreen,
                                enum pipe_format format,
                                enum pipe_texture_target target,
@@ -54,6 +66,12 @@ fd6_screen_is_format_supported(struct pipe_screen *pscreen,
    unsigned retval = 0;
 
    usage &= ~PIPE_BIND_SAMPLER_VIEW_SUBOPTIMAL;
+
+   if (usage & PIPE_BIND_OPENCL) {
+      if (!is_cl_supported(screen->info, format))
+         return false;
+      usage &= ~PIPE_BIND_OPENCL;
+   }
 
    if ((target >= PIPE_MAX_TEXTURE_TYPES) ||
        !valid_sample_count(sample_count, is_suboptimal)) {
@@ -70,7 +88,7 @@ fd6_screen_is_format_supported(struct pipe_screen *pscreen,
       retval |= PIPE_BIND_VERTEX_BUFFER;
    }
 
-   bool has_color = fd6_color_format(format, TILE6_LINEAR) != FMT6_NONE;
+   bool has_color = fd6_color_format_supported(screen->info, format, TILE6_LINEAR);
    bool has_tex = fd6_texture_format_supported(screen->info, format, TILE6_LINEAR, false);
 
    if ((usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SHADER_IMAGE)) &&
@@ -160,91 +178,17 @@ static const enum pc_di_primtype primtypes[] = {
 };
 /* clang-format on */
 
-static unsigned
-calc_gmem_cache_offsets(struct fd_screen *screen, struct fd6_gmem_config *config)
-{
-   unsigned num_ccu = screen->info->num_ccu;
-
-   /* Layout from end of gmem: */
-   unsigned offset = screen->gmemsize_bytes;
-
-   // ????
-   offset -= 0x78000;
-
-   config->vpc_bv_pos_buf_offset = offset - (num_ccu * config->vpc_bv_pos_buf_size);
-   offset = config->vpc_bv_pos_buf_offset;
-
-   config->vpc_attr_buf_offset = offset - (num_ccu * config->vpc_attr_buf_size);
-   offset = config->vpc_attr_buf_offset;
-
-   config->vpc_pos_buf_offset = offset - (num_ccu * config->vpc_pos_buf_size);
-   offset = config->vpc_pos_buf_offset;
-
-   config->color_ccu_offset = offset - (num_ccu * config->color_cache_size);
-   offset = config->color_ccu_offset;
-
-   config->depth_ccu_offset = offset - (num_ccu * config->depth_cache_size);
-   offset = config->depth_ccu_offset;
-
-   return offset;
-}
-
 void
 fd6_screen_init(struct pipe_screen *pscreen)
 {
    struct fd_screen *screen = fd_screen(pscreen);
-   const struct fd_dev_info *info = screen->info;
 
    screen->max_rts = A6XX_MAX_RENDER_TARGETS;
 
-   uint32_t depth_cache_size =
-      screen->info->num_ccu * screen->info->props.sysmem_per_ccu_depth_cache_size;
-   uint32_t color_cache_size =
-      (screen->info->num_ccu * screen->info->props.sysmem_per_ccu_color_cache_size);
-   uint32_t color_cache_size_gmem =
-      color_cache_size /
-      (1 << screen->info->props.gmem_ccu_color_cache_fraction);
-
-   struct fd6_gmem_config *gmem = &screen->config_gmem;
-   struct fd6_gmem_config *sysmem = &screen->config_sysmem;
-
-   sysmem->depth_ccu_offset = 0;
-   sysmem->color_ccu_offset = sysmem->depth_ccu_offset + depth_cache_size;
-
-   /* TODO we could unify gen7/gen8 setup.. gen7 is a subset.. */
-   if (info->chip == 8) {
-      gmem->depth_cache_fraction = info->props.gmem_ccu_depth_cache_fraction;
-      gmem->depth_cache_size     = info->props.gmem_per_ccu_depth_cache_size;
-      gmem->color_cache_fraction = info->props.gmem_ccu_color_cache_fraction;
-      gmem->color_cache_size     = info->props.gmem_per_ccu_color_cache_size;
-      gmem->vpc_attr_buf_size    = info->props.gmem_vpc_attr_buf_size;
-      gmem->vpc_pos_buf_size     = info->props.gmem_vpc_pos_buf_size;
-      gmem->vpc_bv_pos_buf_size  = info->props.gmem_vpc_bv_pos_buf_size;
-
-      sysmem->depth_cache_fraction = info->props.sysmem_ccu_depth_cache_fraction;
-      sysmem->depth_cache_size     = info->props.sysmem_per_ccu_depth_cache_size;
-      sysmem->color_cache_fraction = info->props.sysmem_ccu_color_cache_fraction;
-      sysmem->color_cache_size     = info->props.sysmem_per_ccu_color_cache_size;
-      sysmem->vpc_attr_buf_size    = info->props.sysmem_vpc_attr_buf_size;
-      sysmem->vpc_pos_buf_size     = info->props.sysmem_vpc_pos_buf_size;
-      sysmem->vpc_bv_pos_buf_size  = info->props.sysmem_vpc_bv_pos_buf_size;
-
-      calc_gmem_cache_offsets(screen, sysmem);
-      screen->gmemsize_bytes = calc_gmem_cache_offsets(screen, gmem);
-   } else if (screen->info->props.has_gmem_vpc_attr_buf) {
-      sysmem->vpc_attr_buf_size = screen->info->props.sysmem_vpc_attr_buf_size;
-      sysmem->vpc_attr_buf_offset = sysmem->color_ccu_offset + color_cache_size;
-
-      gmem->vpc_attr_buf_size = screen->info->props.gmem_vpc_attr_buf_size;
-      gmem->vpc_attr_buf_offset = screen->gmemsize_bytes -
-         (gmem->vpc_attr_buf_size * screen->info->num_ccu);
-
-      gmem->color_ccu_offset = gmem->vpc_attr_buf_offset - color_cache_size_gmem;
-      screen->gmemsize_bytes = gmem->vpc_attr_buf_offset;
-   } else {
-      gmem->depth_ccu_offset = 0;
-      gmem->color_ccu_offset = screen->gmemsize_bytes - color_cache_size_gmem;
-   }
+   screen->gmemsize_bytes =
+      fd6_calc_gmem_cache_offsets(screen->info, screen->gmemsize_bytes,
+                                  &screen->config_gmem,
+                                  &screen->config_sysmem);
 
    /* Currently only FB_READ forces GMEM path, mostly because we'd have to
     * deal with cmdstream patching otherwise..

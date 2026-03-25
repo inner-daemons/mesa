@@ -20,11 +20,12 @@
 #include <sys/types.h>
 #include <xf86drm.h>
 
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 #include "wsi_common.h"
 
 #include "pvr_device_info.h"
+#include "pvr_formats.h"
 
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR) || defined(VK_USE_PLATFORM_WAYLAND_KHR)
 #   define PVR_USE_WSI_PLATFORM true
@@ -32,7 +33,6 @@
 #   define PVR_USE_WSI_PLATFORM false
 #endif
 
-struct pvr_format;
 struct pvr_instance;
 typedef struct _pco_ctx pco_ctx;
 
@@ -44,8 +44,11 @@ struct pvr_physical_device {
 
    char *render_path;
    char *display_path;
+   bool has_primary;
 
-   /* primary node (cardN) of the render device */
+   /* primary node (cardN) of the render device
+    * Only valid when has_primary is true.
+    */
    dev_t primary_devid;
    /* render node (renderN) of the render device */
    dev_t render_devid;
@@ -60,11 +63,10 @@ struct pvr_physical_device {
 
    pco_ctx *pco_ctx;
 
-   const struct pvr_format *formats;
-   unsigned num_formats;
+   struct pvr_format_table formats;
 
-   uint8_t device_uuid[SHA1_DIGEST_LENGTH];
-   uint8_t cache_uuid[SHA1_DIGEST_LENGTH];
+   uint8_t device_uuid[BLAKE3_KEY_LEN];
+   uint8_t cache_uuid[BLAKE3_KEY_LEN];
 };
 
 VK_DEFINE_HANDLE_CASTS(pvr_physical_device,

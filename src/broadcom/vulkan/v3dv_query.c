@@ -21,7 +21,12 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "common/v3d_util.h"
+#include "perfcntrs/v3d_perfcntrs.h"
 
 #include "util/timespec.h"
 #include "compiler/nir/nir_builder.h"
@@ -1376,10 +1381,10 @@ v3dv_EnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR(
          counter->scope = VK_PERFORMANCE_COUNTER_SCOPE_COMMAND_KHR;
          counter->storage = VK_PERFORMANCE_COUNTER_STORAGE_UINT64_KHR;
 
-         unsigned char sha1_result[20];
-         _mesa_sha1_compute(perfcntr_desc->name, strlen(perfcntr_desc->name), sha1_result);
+         unsigned char blake3_result[BLAKE3_KEY_LEN];
+         _mesa_blake3_compute(perfcntr_desc->name, strlen(perfcntr_desc->name), blake3_result);
 
-         memcpy(counter->uuid, sha1_result, sizeof(counter->uuid));
+         memcpy(counter->uuid, blake3_result, sizeof(counter->uuid));
       }
 
       vk_outarray_append_typed(VkPerformanceCounterDescriptionKHR,

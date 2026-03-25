@@ -35,11 +35,16 @@
 #include "vk_sync_timeline.h"
 #include "vk_util.h"
 #include "util/compiler.h"
+#include "util/detect_os.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/perf/cpu_trace.h"
 #include "util/ralloc.h"
 #include "util/timespec.h"
+
+/* Breaks linking cycles since WSI common depends on runtime,
+ * and Meson does not allow runtime to depend on WSI common. */
+#include "vulkan/wsi/wsi_common_private.h"
 
 static enum vk_device_timeline_mode
 get_timeline_mode(struct vk_physical_device *physical_device)
@@ -246,6 +251,7 @@ vk_device_init(struct vk_device *device,
       const VkTimeDomainKHR calibrate_domains[] = {
          VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
          VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
+         VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR,
       };
       for (uint32_t i = 0; i < ARRAY_SIZE(calibrate_domains); i++) {
          const VkTimeDomainKHR domain = calibrate_domains[i];
@@ -264,6 +270,8 @@ vk_device_init(struct vk_device *device,
    result = vk_device_memory_report_init(device, pCreateInfo);
    if (result != VK_SUCCESS)
       return result;
+
+   device->disable_lto = false;
 
    return VK_SUCCESS;
 }
@@ -804,7 +812,15 @@ vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
    }
 
    /* device is not used for host time domains */
-#ifndef _WIN32
+#if DETECT_OS_WINDOWS
+   if (domain == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR) {
+      LARGE_INTEGER ts;
+      if (QueryPerformanceCounter(&ts)) {
+         *timestamp = ts.QuadPart;
+         return VK_SUCCESS;
+      }
+   }
+#else /* !DETECT_OS_WINDOWS */
    clockid_t clockid;
    struct timespec ts;
 
@@ -834,7 +850,7 @@ vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
    return VK_SUCCESS;
 
 fail:
-#endif /* _WIN32 */
+#endif /* DETECT_OS_WINDOWS */
    return VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
@@ -852,7 +868,12 @@ vk_common_GetCalibratedTimestampsKHR(
    result =
       vk_device_get_timestamp(device, device->calibrate_time_domain, &begin);
    for (uint32_t i = 0; i < timestampCount; i++) {
-      const VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
+      VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
+      if (domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) {
+         const VkSwapchainCalibratedTimestampInfoEXT *swap =
+               vk_find_struct_const(pTimestampInfos[i].pNext, SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT);
+         domain = wsi_common_get_time_domain(swap->swapchain, swap->presentStage, swap->timeDomainId);
+      }
       if (domain == device->calibrate_time_domain)
          pTimestamps[i] = begin;
       else
@@ -866,8 +887,26 @@ vk_common_GetCalibratedTimestampsKHR(
 
    uint64_t max_clock_period = 0;
    for (uint32_t i = 0; i < timestampCount; i++) {
-      const VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
-      const uint64_t period = domain == VK_TIME_DOMAIN_DEVICE_KHR
+      VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
+
+      bool domain_is_device_derived = domain == VK_TIME_DOMAIN_DEVICE_KHR;
+
+      if (domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) {
+         /* Need to rescale device timestamps to nanoseconds. */
+         const VkSwapchainCalibratedTimestampInfoEXT *swap =
+               vk_find_struct_const(pTimestampInfos[i].pNext, SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT);
+         if (wsi_common_get_time_domain(swap->swapchain, swap->presentStage, swap->timeDomainId) ==
+             VK_TIME_DOMAIN_DEVICE_KHR) {
+            pTimestamps[i] = (uint64_t)((double)pTimestamps[i] * (double)device->physical->properties.timestampPeriod);
+         }
+
+         /* Timestamps in QueueOperationsEnd are always derived from a device timestamp,
+          * even if the reported time domain is not. */
+         if (swap->presentStage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
+            domain_is_device_derived = true;
+      }
+
+      const uint64_t period = domain_is_device_derived
          ? device->device_time_domain_period
          : domain != device->calibrate_time_domain ? 1 : 0;
       max_clock_period = MAX2(max_clock_period, period);
@@ -877,24 +916,3 @@ vk_common_GetCalibratedTimestampsKHR(
 
    return VK_SUCCESS;
 }
-
-#ifndef _WIN32
-
-uint64_t
-vk_clock_gettime(clockid_t clock_id)
-{
-   struct timespec current;
-   int ret;
-
-   ret = clock_gettime(clock_id, &current);
-#ifdef CLOCK_MONOTONIC_RAW
-   if (ret < 0 && clock_id == CLOCK_MONOTONIC_RAW)
-      ret = clock_gettime(CLOCK_MONOTONIC, &current);
-#endif
-   if (ret < 0)
-      return 0;
-
-   return (uint64_t)current.tv_sec * 1000000000ULL + current.tv_nsec;
-}
-
-#endif //!_WIN32

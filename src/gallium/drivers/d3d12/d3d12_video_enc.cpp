@@ -73,7 +73,6 @@ d3d12_video_encoder_convert_codec_to_d3d12_enc_codec(enum pipe_video_profile pro
          return D3D12_VIDEO_ENCODER_CODEC_AV1;
       } break;
       case PIPE_VIDEO_FORMAT_MPEG12:
-      case PIPE_VIDEO_FORMAT_MPEG4:
       case PIPE_VIDEO_FORMAT_VC1:
       case PIPE_VIDEO_FORMAT_JPEG:
       case PIPE_VIDEO_FORMAT_VP9:
@@ -3026,7 +3025,7 @@ d3d12_video_encoder_calculate_max_slices_count_in_output(
       case D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_BYTES_PER_SUBREGION:
       case D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO:
       {
-         maxSlices = MaxSubregionsNumberFromCaps;
+         maxSlices = std::max(128u, MaxSubregionsNumberFromCaps);
       } break;
       case D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_SQUARE_UNITS_PER_SUBREGION_ROW_UNALIGNED:
       {
@@ -4836,6 +4835,8 @@ d3d12_video_encoder_get_feedback(struct pipe_video_codec *codec,
          *output_buffer_size,
          pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].comp_bit_destinations[0/*first slice*/]->width0);
       opt_metadata.encode_result |= PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_MAX_FRAME_SIZE_OVERFLOW;
+      if (pMetadata)
+         *pMetadata = opt_metadata;
       assert(false);
    }
 

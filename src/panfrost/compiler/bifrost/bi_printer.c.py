@@ -1,24 +1,5 @@
-#
 # Copyright (C) 2020 Collabora, Ltd.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice (including the next
-# paragraph) shall be included in all copies or substantial portions of the
-# Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-# IN THE SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 TEMPLATE = """#include <stdio.h>
 #include "compiler.h"
@@ -104,9 +85,9 @@ bi_print_index(FILE *fp, bi_index index)
     else if (index.type == BI_INDEX_PASS)
         fprintf(fp, "%s", bir_passthrough_name(index.value));
     else if (index.type == BI_INDEX_REGISTER)
-        fprintf(fp, "r%u", index.value);
+        fprintf(fp, "%s%u", index.memory ? "m" : "r", index.value);
     else if (index.type == BI_INDEX_NORMAL)
-        fprintf(fp, "%u", index.value);
+        fprintf(fp, "%s%u", index.memory ? "m" : "", index.value);
     else
         UNREACHABLE("Invalid index");
 
@@ -170,7 +151,7 @@ bi_${mod}_as_str(enum bi_${mod} ${mod})
 </%def>
 
 void
-bi_print_instr(const bi_instr *I, FILE *fp)
+bi_print_instr_impl(const bi_instr *I, FILE *fp)
 {
     fputs("   ", fp);
 

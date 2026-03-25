@@ -182,9 +182,14 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
       operation->pooling.padding_same = params->padding == kTfLitePaddingSame;
       break;
    }
-   case kTfLiteBuiltinAdd:
+   case kTfLiteBuiltinAdd: {
+      TfLiteAddParams *params = (TfLiteAddParams *)node->builtin_data;
+
       operation->type = PIPE_ML_OPERATION_TYPE_ADD;
+      operation->add.relu = params->activation == kTfLiteActRelu ||
+                            params->activation == kTfLiteActRelu6;
       break;
+   }
    case kTfLiteBuiltinConcatenation: {
       TfLiteConcatenationParams *params = node->builtin_data;
 
@@ -308,6 +313,35 @@ all_zero_points_equal(const TfLiteAffineQuantization *quant)
    return true;
 }
 
+static size_t
+tf_format_to_size(TfLiteType type)
+{
+   switch (type) {
+   case kTfLiteFloat32:
+      return sizeof(float);
+   case kTfLiteFloat64:
+      return sizeof(double);
+   case kTfLiteInt8:
+      return sizeof(int8_t);
+   case kTfLiteUInt8:
+      return sizeof(uint8_t);
+   case kTfLiteInt16:
+      return sizeof(int16_t);
+   case kTfLiteUInt16:
+      return sizeof(uint16_t);
+   case kTfLiteInt32:
+      return sizeof(int32_t);
+   case kTfLiteUInt32:
+      return sizeof(uint32_t);
+   case kTfLiteInt64:
+      return sizeof(int64_t);
+   case kTfLiteUInt64:
+      return sizeof(uint64_t);
+   default:
+      return 0;
+   }
+}
+
 static void
 fill_tensor(struct teflon_delegate *delegate, TfLiteContext *tf_context, struct pipe_tensor *tensor, unsigned index)
 {
@@ -320,6 +354,7 @@ fill_tensor(struct teflon_delegate *delegate, TfLiteContext *tf_context, struct 
    if (tf_tensor.data.data)
       tensor->resource = create_resource(context, tf_tensor);
 
+   tensor->type_size = tf_format_to_size(tf_tensor.type);
    tensor->index = index;
    for (int out_dim = 0; out_dim < 4; out_dim++) {
       int in_dim = tf_tensor.dims->size - 4 + out_dim;
@@ -334,14 +369,28 @@ fill_tensor(struct teflon_delegate *delegate, TfLiteContext *tf_context, struct 
       tensor->scale = quant->scale->data[0];
       tensor->zero_point = quant->zero_point->data[0];
 
-      assert(quant->scale->size == quant->zero_point->size);
-      if (quant->scale->size > 1 &&
-          (!all_scales_equal(quant) || !all_zero_points_equal(quant))) {
+      /* Handle per-channel quantization */
+      if (quant->scale->size > 1 && !all_scales_equal(quant)) {
          tensor->scales = calloc(quant->scale->size, sizeof(*tensor->scales));
          memcpy(tensor->scales, quant->scale->data, quant->scale->size * sizeof(*tensor->scales));
 
-         tensor->zero_points = calloc(quant->zero_point->size, sizeof(*tensor->zero_points));
-         memcpy(tensor->zero_points, quant->zero_point->data, quant->zero_point->size * sizeof(*tensor->zero_points));
+         tensor->zero_points = calloc(quant->scale->size, sizeof(*tensor->zero_points));
+         if (quant->zero_point->size == quant->scale->size) {
+            /* Same number of zero_points as scales - copy directly */
+            memcpy(tensor->zero_points, quant->zero_point->data, quant->scale->size * sizeof(*tensor->zero_points));
+         } else if (quant->zero_point->size == 1) {
+            /* Single zero_point for all channels (common for symmetric quantization) - replicate it */
+            for (int i = 0; i < quant->scale->size; i++) {
+               tensor->zero_points[i] = quant->zero_point->data[0];
+            }
+         } else {
+            /* Unexpected case - use first zero_point for all */
+            fprintf(stderr, "teflon: WARNING: tensor %d has %d scales but %d zero_points, using first zero_point for all\n",
+                    index, quant->scale->size, quant->zero_point->size);
+            for (int i = 0; i < quant->scale->size; i++) {
+               tensor->zero_points[i] = quant->zero_point->data[0];
+            }
+         }
       }
    }
 
@@ -376,74 +425,79 @@ dump_graph(struct pipe_tensor *tensors, unsigned tensor_count, struct pipe_ml_op
    }
 
    teflon_debug("\n");
-   teflon_debug("%3s %-6s %25s %25s  %s\n", "idx", "type", "inputs", "outputs", "operation type-specific");
-   teflon_debug("================================================================================================\n");
+   teflon_debug("%3s %-15s %-20s %-20s\n", "idx", "type", "inputs", "outputs");
+   teflon_debug("==========================================================================\n");
    for (int i = 0; i < operation_count; i++) {
       teflon_debug("%3d ", i);
 
       switch (operations[i].type) {
       case PIPE_ML_OPERATION_TYPE_ADD:
-         teflon_debug("%-6s ", "ADD");
+         teflon_debug("%-15s ", "ADD");
          break;
       case PIPE_ML_OPERATION_TYPE_CONVOLUTION:
-         teflon_debug("%-6s ", operations[i].conv.depthwise ? "DWCONV" : "CONV");
+         teflon_debug("%-15s ", operations[i].conv.depthwise ? "DWCONV" : "CONV");
          break;
       case PIPE_ML_OPERATION_TYPE_CONCATENATION:
-         teflon_debug("%-6s ", "CONCAT");
+         teflon_debug("%-15s ", "CONCAT");
          break;
       case PIPE_ML_OPERATION_TYPE_POOLING:
-         teflon_debug("%-6s ", "POOL");
+         teflon_debug("%-15s ", "POOL");
          break;
       case PIPE_ML_OPERATION_TYPE_SPLIT:
-         teflon_debug("%-6s ", "SPLIT");
+         teflon_debug("%-15s ", "SPLIT");
          break;
       case PIPE_ML_OPERATION_TYPE_PAD:
-         teflon_debug("%-6s ", "PAD");
+         teflon_debug("%-15s ", "PAD");
          break;
       case PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED:
-         teflon_debug("%-6s ", "FCON");
+         teflon_debug("%-15s ", "FCON");
          break;
       case PIPE_ML_OPERATION_TYPE_RESHAPE:
-         teflon_debug("%-6s ", "RESHAPE");
+         teflon_debug("%-15s ", "RESHAPE");
          break;
       case PIPE_ML_OPERATION_TYPE_RELU:
-         teflon_debug("%-6s ", "RELU");
+         teflon_debug("%-15s ", "RELU");
          break;
       case PIPE_ML_OPERATION_TYPE_ABSOLUTE:
-         teflon_debug("%-6s ", "ABS");
+         teflon_debug("%-15s ", "ABS");
          break;
       case PIPE_ML_OPERATION_TYPE_LOGISTIC:
-         teflon_debug("%-6s ", "LOG");
+         teflon_debug("%-15s ", "LOG");
          break;
       case PIPE_ML_OPERATION_TYPE_SUBTRACT:
-         teflon_debug("%-6s ", "SUB");
+         teflon_debug("%-15s ", "SUB");
          break;
       case PIPE_ML_OPERATION_TYPE_TRANSPOSE:
-         teflon_debug("%-6s ", "TRANSPOSE");
+         teflon_debug("%-15s ", "TRANSPOSE");
          break;
       case PIPE_ML_OPERATION_TYPE_STRIDED_SLICE:
-         teflon_debug("%-6s ", "STRIDED_SLICE");
+         teflon_debug("%-15s ", "STRIDED_SLICE");
          break;
       case PIPE_ML_OPERATION_TYPE_RESIZE:
-         teflon_debug("%-6s ", "RESIZE");
+         teflon_debug("%-15s ", "RESIZE");
          break;
       }
 
+      char *input_buf = ralloc_strdup(NULL, "");
+
       for (unsigned j = 0; j < operations[i].input_count; j++) {
-         teflon_debug("%d", operations[i].input_tensors[j]->index);
+         ralloc_asprintf_append(&input_buf, "%d", operations[i].input_tensors[j]->index);
          if (j < operations[i].input_count - 1)
-            teflon_debug(",");
+            ralloc_asprintf_append(&input_buf, ",");
       }
 
-      teflon_debug(" ");
+      char *output_buf = ralloc_strdup(NULL, "");
 
       for (unsigned j = 0; j < operations[i].output_count; j++) {
-         teflon_debug("%d", operations[i].output_tensors[j]->index);
+         ralloc_asprintf_append(&output_buf, "%d", operations[i].output_tensors[j]->index);
          if (j < operations[i].output_count - 1)
-            teflon_debug(",");
+            ralloc_asprintf_append(&output_buf, ",");
       }
 
-      teflon_debug("\n");
+      teflon_debug("%-20s %-20s\n", input_buf, output_buf);
+      ralloc_free(input_buf);
+      ralloc_free(output_buf);
+
    }
    teflon_debug("\n");
 }
@@ -606,6 +660,8 @@ tflite_builtin_op_name(TfLiteBuiltinOperator op)
    switch (op) {
    case kTfLiteBuiltinAdd:
       return "ADD";
+   case kTfLiteBuiltinConcatenation:
+      return "CONCAT";
    case kTfLiteBuiltinAveragePool2d:
       return "AVGPOOL";
    case kTfLiteBuiltinMaxPool2d:
@@ -638,6 +694,18 @@ tflite_builtin_op_name(TfLiteBuiltinOperator op)
       return "STRIDED_SLICE";
    case kTfLiteBuiltinResizeNearestNeighbor:
       return "RESIZE";
+   case kTfLiteBuiltinSplit:
+      return "SPLIT";
+   case kTfLiteBuiltinRelu:
+      return "RELU";
+   case kTfLiteBuiltinAbs:
+      return "ABS";
+   case kTfLiteBuiltinLogistic:
+      return "LOG";
+   case kTfLiteBuiltinSub:
+      return "SUB";
+   case kTfLiteBuiltinTranspose:
+      return "TRANSPOSE";
    default:
       return "unknown";
    }
@@ -701,9 +769,10 @@ fused_relu6_supported(TfLiteTensor *tensor)
    assert(tensor->quantization.type == kTfLiteAffineQuantization);
    affine = (TfLiteAffineQuantization *)tensor->quantization.params;
 
-   assert(affine->scale->size == affine->zero_point->size);
-   for (int i = 0; i < affine->zero_point->size; i++) {
-      if ((quantized_max - affine->zero_point->data[i]) * affine->scale->data[i] > 6.0f)
+   /* Handle per-channel quantization where zero_point->size may be 1 */
+   for (int i = 0; i < affine->scale->size; i++) {
+      int zp_idx = (affine->zero_point->size == 1) ? 0 : i;
+      if ((quantized_max - affine->zero_point->data[zp_idx]) * affine->scale->data[i] > 6.0f)
          return false;
    }
    return true;
@@ -739,8 +808,9 @@ PrepareDelegate(TfLiteContext *tf_context, TfLiteDelegate *tf_delegate)
 
    for (int i = 0; i < tf_context->tensors_size; i++)
       fill_tensor(delegate, tf_context, &delegate->tensors[i], i);
+   delegate->tensor_count = tf_context->tensors_size;
 
-   teflon_debug("%3s %7s %3s %-11s %s\n", "idx", "type", "ver", "support", "inputs");
+   teflon_debug("%3s %-15s %3s %-11s %s\n", "idx", "type", "ver", "support", "inputs");
    teflon_debug("================================================================================================\n");
 
    // Get a list of supported nodes.
@@ -756,7 +826,7 @@ PrepareDelegate(TfLiteContext *tf_context, TfLiteDelegate *tf_delegate)
 
       supported = check_op_support(tf_delegate, tf_context, node, registration);
 
-      teflon_debug("%3d %7s v%-2d %-11s in:", node_index,
+      teflon_debug("%3d %-15s v%-2d %-11s in:", node_index,
                    tflite_builtin_op_name(registration->builtin_code),
                    registration->version,
                    supported ? "supported" : "unsupported");
@@ -935,9 +1005,14 @@ tflite_plugin_destroy_delegate(TfLiteDelegate *tf_delegate)
    }
 
    for (int i = 0; i < delegate->tensor_count; i++) {
-      free(delegate->tensors[i].scales);
-      free(delegate->tensors[i].zero_points);
-      pipe_resource_reference(&delegate->tensors[i].resource, NULL);
+      if (delegate->tensors[i].scales)
+         free(delegate->tensors[i].scales);
+
+      if (delegate->tensors[i].zero_points)
+         free(delegate->tensors[i].zero_points);
+
+      if (delegate->tensors[i].resource)
+         pipe_resource_reference(&delegate->tensors[i].resource, NULL);
    }
    free(delegate->tensors);
 

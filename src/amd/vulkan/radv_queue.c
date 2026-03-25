@@ -479,6 +479,10 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
    uint64_t scratch_va;
    uint32_t rsrc1;
 
+   /* Ensure there is always a mapped BO in s[0:1] for the SMEM OOB mitigation */
+   if (!compute_scratch_bo && pdev->cache_key.mitigate_smem_oob)
+      compute_scratch_bo = device->zero_bo;
+
    if (!compute_scratch_bo)
       return;
 
@@ -537,6 +541,10 @@ radv_emit_graphics_shader_pointers(struct radv_device *device, struct radv_cmd_s
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    uint64_t va;
+
+   /* Ensure there is always a mapped BO in s[0:1] for the SMEM OOB mitigation */
+   if (!descriptor_bo && pdev->cache_key.mitigate_smem_oob)
+      descriptor_bo = device->zero_bo;
 
    if (!descriptor_bo)
       return;
@@ -678,8 +686,8 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
 
    if (!device->uses_shadow_regs) {
       ac_pm4_cmd_add(pm4, PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
-      ac_pm4_cmd_add(pm4, CC0_UPDATE_LOAD_ENABLES(1));
-      ac_pm4_cmd_add(pm4, CC1_UPDATE_SHADOW_ENABLES(1));
+      ac_pm4_cmd_add(pm4, S_28_1_UPDATE_LOAD_ENABLES(1));
+      ac_pm4_cmd_add(pm4, S_28_2_UPDATE_SHADOW_ENABLES(1));
 
       if (has_clear_state) {
          ac_pm4_cmd_add(pm4, PKT3(PKT3_CLEAR_STATE, 0, 0));
@@ -702,8 +710,6 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
 
    if (!has_clear_state) {
       ac_pm4_set_reg(pm4, R_028230_PA_SC_EDGERULE, 0xAAAAAAAA);
-      /* PA_SU_HARDWARE_SCREEN_OFFSET must be 0 due to hw bug on GFX6 */
-      ac_pm4_set_reg(pm4, R_028234_PA_SU_HARDWARE_SCREEN_OFFSET, 0);
    }
 
    if (pdev->info.gfx_level <= GFX8)
@@ -1537,7 +1543,7 @@ radv_create_perf_counter_lock_cs(struct radv_device *device, unsigned pass, bool
    if (!unlock) {
       uint64_t mutex_va = radv_buffer_get_va(device->perf_counter_bo) + PERF_CTR_BO_LOCK_OFFSET;
 
-      ac_emit_cp_atomic_mem(cs->b, TC_OP_ATOMIC_CMPSWAP_32, ATOMIC_COMMAND_LOOP, mutex_va, 1, 0);
+      ac_emit_cp_atomic_mem(cs->b, V_1E_1_GL2_OP_ATOMIC_CMPSWAP_32, V_1E_1_LOOP_UNTIL_COMPARE_SATISFIED, mutex_va, 1, 0);
    }
 
    uint64_t va = radv_buffer_get_va(device->perf_counter_bo) + PERF_CTR_BO_PASS_OFFSET;
@@ -1787,7 +1793,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
    queue->last_shader_upload_seq = MAX2(queue->last_shader_upload_seq, shader_upload_seq);
 
-   radv_dump_printf_data(device, stdout);
+   radv_dump_printf_data(device, stderr);
 
 fail:
    free(cs_array);

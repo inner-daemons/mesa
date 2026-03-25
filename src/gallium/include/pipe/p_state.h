@@ -145,6 +145,12 @@ struct pipe_rasterizer_state
    unsigned rasterizer_discard:1;
 
    /**
+    * Which vertex stream to rasterize (0-3).
+    * Only meaningful with geometry shaders and stream output.
+    */
+   unsigned rasterization_stream:2;
+
+   /**
     * Exposed by pipe_caps.tile_raster_order.  When true,
     * tile_raster_order_increasing_* indicate the order that the rasterizer
     * should render tiles, to meet the requirements of
@@ -418,7 +424,6 @@ struct pipe_surface
    unsigned level;
 
    struct pipe_resource *texture; /**< resource into which this is a view  */
-   struct pipe_context *context; /**< context this surface belongs to */
 };
 
 /**
@@ -1038,6 +1043,7 @@ struct pipe_tensor {
     * Whether the tensor contains data in INT8 or UINT8 format.
     */
    bool is_signed;
+   uint8_t type_size;
 };
 
 /**
@@ -1212,6 +1218,13 @@ struct pipe_ml_operation
           */
          bool relu;
       } fcon;
+
+      struct {
+         /**
+          * Whether a ReLU activation should be applied to the output.
+          */
+         bool relu;
+      } add;
 
       struct {
          /**

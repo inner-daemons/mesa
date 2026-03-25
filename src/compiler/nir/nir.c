@@ -658,16 +658,22 @@ nir_alu_src_copy(nir_alu_src *dest, const nir_alu_src *src)
 }
 
 bool
-nir_alu_src_is_trivial_ssa(const nir_alu_instr *alu, unsigned srcn)
+nir_alu_src_is_trivial_ssa(const nir_alu_src *src, unsigned num_components)
 {
    static uint8_t trivial_swizzle[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
    STATIC_ASSERT(ARRAY_SIZE(trivial_swizzle) == NIR_MAX_VEC_COMPONENTS);
 
+   return (src->src.ssa->num_components == num_components) &&
+          (memcmp(src->swizzle, trivial_swizzle, num_components) == 0);
+}
+
+bool
+nir_alu_has_trivial_src(const nir_alu_instr *alu, unsigned srcn)
+{
    const nir_alu_src *src = &alu->src[srcn];
    unsigned num_components = nir_ssa_alu_instr_src_components(alu, srcn);
 
-   return (src->src.ssa->num_components == num_components) &&
-          (memcmp(src->swizzle, trivial_swizzle, num_components) == 0);
+   return nir_alu_src_is_trivial_ssa(src, num_components);
 }
 
 static void
@@ -1858,7 +1864,7 @@ nir_def_components_read(const nir_def *def)
 bool
 nir_def_all_uses_are_fsat(const nir_def *def)
 {
-   nir_foreach_use(src, def) {
+   nir_foreach_use_including_if(src, def) {
       if (nir_src_is_if(src))
          return false;
 
@@ -1877,7 +1883,7 @@ nir_def_all_uses_are_fsat(const nir_def *def)
 bool
 nir_def_all_uses_ignore_sign_bit(const nir_def *def)
 {
-   nir_foreach_use(use, def) {
+   nir_foreach_use_including_if(use, def) {
       if (nir_src_is_if(use))
          return false;
       nir_instr *instr = nir_src_parent_instr(use);
@@ -2466,10 +2472,6 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_patch_vertices_in;
    case SYSTEM_VALUE_HELPER_INVOCATION:
       return nir_intrinsic_load_helper_invocation;
-   case SYSTEM_VALUE_COLOR0:
-      return nir_intrinsic_load_color0;
-   case SYSTEM_VALUE_COLOR1:
-      return nir_intrinsic_load_color1;
    case SYSTEM_VALUE_VIEW_INDEX:
       return nir_intrinsic_load_view_index;
    case SYSTEM_VALUE_AMPLIFICATION_ID_KK:
@@ -2650,10 +2652,6 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
       return SYSTEM_VALUE_VERTICES_IN;
    case nir_intrinsic_load_helper_invocation:
       return SYSTEM_VALUE_HELPER_INVOCATION;
-   case nir_intrinsic_load_color0:
-      return SYSTEM_VALUE_COLOR0;
-   case nir_intrinsic_load_color1:
-      return SYSTEM_VALUE_COLOR1;
    case nir_intrinsic_load_view_index:
       return SYSTEM_VALUE_VIEW_INDEX;
    case nir_intrinsic_load_amplification_id_kk:
@@ -3361,8 +3359,11 @@ nir_intrinsic_copy_const_indices(nir_intrinsic_instr *dst, nir_intrinsic_instr *
       /* require that dst instruction also uses the same const_index[]: */
       assert(dst_info->index_map[i] > 0);
 
-      dst->const_index[dst_info->index_map[i] - 1] =
-         src->const_index[src_info->index_map[i] - 1];
+      unsigned size = nir_intrinsic_index_size(i);
+
+      memcpy(&dst->const_index[dst_info->index_map[i] - 1],
+             &src->const_index[src_info->index_map[i] - 1],
+             sizeof(dst->const_index[0]) * size);
    }
 }
 
@@ -3443,6 +3444,12 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_custom_border_color_agx:
       return 4;
 
+   case nir_texop_sample_weighted_qcom:
+   case nir_texop_box_filter_qcom:
+   case nir_texop_block_match_sad_qcom:
+   case nir_texop_block_match_ssd_qcom:
+      return 4;
+
    default:
       if (instr->is_shadow && instr->is_new_style_shadow)
          return 1;
@@ -3481,6 +3488,10 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_samples_identical:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_fragment_fetch_amd:
+   case nir_texop_sample_weighted_qcom:
+   case nir_texop_box_filter_qcom:
+   case nir_texop_block_match_sad_qcom:
+   case nir_texop_block_match_ssd_qcom:
       return false;
    default:
       UNREACHABLE("Invalid texture opcode");
@@ -3507,6 +3518,7 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
 {
    switch (instr->src[src].src_type) {
    case nir_tex_src_coord:
+   case nir_tex_src_ref_coord:
       switch (instr->op) {
       case nir_texop_txf:
       case nir_texop_txf_ms:
@@ -3515,6 +3527,8 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
       case nir_texop_samples_identical:
       case nir_texop_fragment_fetch_amd:
       case nir_texop_fragment_mask_fetch_amd:
+      case nir_texop_block_match_sad_qcom:
+      case nir_texop_block_match_ssd_qcom:
          return nir_type_int;
 
       default:
@@ -3543,6 +3557,7 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_ddy:
    case nir_tex_src_backend1:
    case nir_tex_src_backend2:
+   case nir_tex_src_box_size:
       return nir_type_float;
 
    case nir_tex_src_offset:
@@ -3560,6 +3575,11 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_sampler_offset:
    case nir_tex_src_texture_handle:
    case nir_tex_src_sampler_handle:
+   case nir_tex_src_texture_2_deref:
+   case nir_tex_src_sampler_2_deref:
+   case nir_tex_src_texture_2_handle:
+   case nir_tex_src_sampler_2_handle:
+   case nir_tex_src_block_size:
       return nir_type_uint;
 
    case nir_num_tex_src_types:
@@ -3572,12 +3592,23 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
 unsigned
 nir_tex_instr_src_size(const nir_tex_instr *instr, unsigned src)
 {
-   if (instr->src[src].src_type == nir_tex_src_coord)
+   if (instr->src[src].src_type == nir_tex_src_coord )
       return instr->coord_components;
 
    /* The MCS value is expected to be a vec4 returned by a txf_ms_mcs_intel */
    if (instr->src[src].src_type == nir_tex_src_ms_mcs_intel)
       return 4;
+
+   if (instr->src[src].src_type == nir_tex_src_box_size)
+      return 2;
+
+   /* These are vec2s at the spirv level, but get lowered to 16_16 packed values
+    * in the backend, so they don't have a single known size
+    */
+   if (instr->src[src].src_type == nir_tex_src_ref_coord ||
+       instr->src[src].src_type == nir_tex_src_block_size) {
+      return 0;
+   }
 
    if (instr->src[src].src_type == nir_tex_src_ddx ||
        instr->src[src].src_type == nir_tex_src_ddy) {
@@ -3620,12 +3651,12 @@ nir_instr_xfb_write_mask(nir_intrinsic_instr *instr)
       unsigned wr_mask = nir_intrinsic_write_mask(instr) << nir_intrinsic_component(instr);
       assert((wr_mask & ~0xf) == 0); /* only 4 components allowed */
 
+      nir_io_xfb xfb = nir_intrinsic_io_xfb(instr);
       unsigned iter_mask = wr_mask;
       while (iter_mask) {
          unsigned i = u_bit_scan(&iter_mask);
-         nir_io_xfb xfb = i < 2 ? nir_intrinsic_io_xfb(instr) : nir_intrinsic_io_xfb2(instr);
-         if (xfb.out[i % 2].num_components)
-            mask |= BITFIELD_RANGE(i, xfb.out[i % 2].num_components) & wr_mask;
+         if (xfb.out[i].num_components)
+            mask |= BITFIELD_RANGE(i, xfb.out[i].num_components) & wr_mask;
       }
    }
 

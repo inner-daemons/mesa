@@ -370,6 +370,7 @@ opt_shrink_vectors_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_ssbo_intel:
    case nir_intrinsic_load_push_constant:
+   case nir_intrinsic_load_push_data_intel:
    case nir_intrinsic_load_constant:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
@@ -522,7 +523,7 @@ opt_shrink_vectors_phi(nir_builder *b, nir_phi_instr *instr)
          if (src_idx != alu->src[src_idx].swizzle[0]) {
             mask |= src_read_mask;
          }
-      } else if (!nir_alu_src_is_trivial_ssa(alu, src_idx)) {
+      } else if (!nir_alu_has_trivial_src(alu, src_idx)) {
          mask |= src_read_mask;
       }
    }

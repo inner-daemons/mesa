@@ -1,15 +1,8 @@
-# since Debian 12 CI uprev
-dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.diff_attachments_2d_32x32_39x41_ms
-
-# uprev Piglit in Mesa
+dEQP-VK.binding_model.descriptor_buffer.sparse_residency_buffer.capture_replay.compute_comp_combined_image_sampler_custom_border_color
 dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.2_secondary_2_primary_cmdbuffers_resuming
 dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_secondary_primary_cmdbuffers_resuming
-
-dEQP-VK.pipeline.fast_linked_library.multisample.m10_resolve.resolve_cmd.d16_unorm_s8_uint.depth.average.regions_multilayer.no_flags
-dEQP-VK.pipeline.fast_linked_library.multisample.m10_resolve.resolve_cmd.d16_unorm_s8_uint.depth.min.regions_multilayer.no_flags
-dEQP-VK.pipeline.fast_linked_library.multisample.m10_resolve.resolve_cmd.d16_unorm_s8_uint.depth_stencil.min.regions_multilayer.no_flags
-dEQP-VK.pipeline.fast_linked_library.multisample.m10_resolve.resolve_cmd.d32_sfloat_s8_uint.stencil.sample_zero.regions_multilayer.no_flags
-dEQP-VK.pipeline.monolithic.multisample.m10_resolve.resolve_cmd.d16_unorm.depth.min.regions_multilayer.no_flags
-dEQP-VK.pipeline.monolithic.multisample.m10_resolve.resolve_cmd.d32_sfloat.depth.average.regions_multilayer.no_flags
-dEQP-VK.pipeline.monolithic.multisample.m10_resolve.resolve_cmd.d32_sfloat_s8_uint.depth_stencil.max.regions_multilayer.no_flags
-dEQP-VK.pipeline.shader_object_unlinked_spirv.multisample.m10_resolve.resolve_cmd.d16_unorm_s8_uint.depth_stencil.min.regions_multilayer.no_flags
+dEQP-VK.image.swapchain_mutable.direct.2d.b8g8r8a8_unorm_b8g8r8a8_srgb_clear_copy_format_list
+dEQP-VK.image.swapchain_mutable.direct.2d.b8g8r8a8_unorm_b8g8r8a8_srgb_draw_copy_format_list
+dEQP-VK.image.swapchain_mutable.direct.2d_array.b8g8r8a8_unorm_b8g8r8a8_srgb_draw_copy_format_list
+dEQP-VK.image.swapchain_mutable.direct_drm.2d_array.b8g8r8a8_unorm_b8g8r8a8_srgb_copy_copy_format_list
+dEQP-VK.pipeline.pipeline_library.framebuffer_attachment.diff_attachments_2d_32x32_39x41_ms

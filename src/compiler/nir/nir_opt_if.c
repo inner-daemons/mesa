@@ -284,7 +284,7 @@ is_trivial_bcsel(const nir_instr *instr, bool allow_non_phi_src)
       return false;
 
    for (unsigned i = 0; i < 3; i++) {
-      if (!nir_alu_src_is_trivial_ssa(bcsel, i) ||
+      if (!nir_alu_has_trivial_src(bcsel, i) ||
           nir_def_block(bcsel->src[i].src.ssa) != instr->block)
          return false;
 
@@ -865,8 +865,7 @@ clone_alu_and_replace_src_defs(nir_builder *b, const nir_alu_instr *alu,
                                nir_def **src_defs)
 {
    nir_alu_instr *nalu = nir_alu_instr_create(b->shader, alu->op);
-   nalu->exact = alu->exact;
-   nalu->fp_fast_math = alu->fp_fast_math;
+   nalu->fp_math_ctrl = alu->fp_math_ctrl;
 
    nir_def_init(&nalu->instr, &nalu->def,
                 alu->def.num_components,
@@ -881,7 +880,6 @@ clone_alu_and_replace_src_defs(nir_builder *b, const nir_alu_instr *alu,
    nir_builder_instr_insert(b, &nalu->instr);
 
    return &nalu->def;
-   ;
 }
 
 /*

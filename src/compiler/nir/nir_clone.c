@@ -267,8 +267,7 @@ clone_alu(clone_state *state, const nir_alu_instr *alu)
 {
    nir_alu_instr *nalu = nir_alu_instr_create(state->ns, alu->op);
    clone_debug_info(state, &nalu->instr, &alu->instr);
-   nalu->exact = alu->exact;
-   nalu->fp_fast_math = alu->fp_fast_math;
+   nalu->fp_math_ctrl = alu->fp_math_ctrl;
    nalu->no_signed_wrap = alu->no_signed_wrap;
    nalu->no_unsigned_wrap = alu->no_unsigned_wrap;
 
@@ -485,6 +484,8 @@ clone_call(clone_state *state, const nir_call_instr *call)
 
    for (unsigned i = 0; i < ncall->num_params; i++)
       __clone_src(state, ncall, &ncall->params[i], &call->params[i]);
+   if (call->indirect_callee.ssa)
+      __clone_src(state, ncall, &ncall->indirect_callee, &call->indirect_callee);
 
    return ncall;
 }

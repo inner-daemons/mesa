@@ -154,8 +154,10 @@ impl<'a> TestShaderBuilder<'a> {
         self.push_op(OpLd {
             dst: dst.clone().into(),
             addr: self.data_addr.clone().into(),
+            pred: true.into(),
             offset: offset.into(),
             access: access,
+            stride: OffsetStride::X1,
         });
         dst
     }
@@ -179,6 +181,7 @@ impl<'a> TestShaderBuilder<'a> {
             data: data.into(),
             offset: offset.into(),
             access: access,
+            stride: OffsetStride::X1,
         });
     }
 
@@ -975,6 +978,74 @@ fn test_op_shf() {
 }
 
 #[test]
+fn test_op_urol() {
+    let run = RunSingleton::get();
+    if run.sm.sm() < 32 {
+        return;
+    }
+
+    let mut b = TestShaderBuilder::new(&run.sm);
+    let invocations = 100;
+
+    let x = Src::from(b.ld_test_data(0, MemType::B32)[0]);
+    let y = Src::from(b.ld_test_data(4, MemType::B32)[0]);
+
+    let dst = b.urol(x, y);
+    b.st_test_data(8, MemType::B32, dst.into());
+
+    let bin = b.compile();
+
+    let mut a = Acorn::new();
+    let mut data = Vec::new();
+    for _ in 0..invocations {
+        data.push([a.get_u32(), a.get_u32() as u32, 0]);
+    }
+
+    run.run.run(&bin, &mut data).unwrap();
+
+    for d in &data {
+        let x = d[0];
+        let y = d[1];
+        let dst = x.rotate_left(y);
+        assert_eq!(d[2], dst as u32);
+    }
+}
+
+#[test]
+fn test_op_uror() {
+    let run = RunSingleton::get();
+    if run.sm.sm() < 32 {
+        return;
+    }
+
+    let mut b = TestShaderBuilder::new(&run.sm);
+    let invocations = 100;
+
+    let x = Src::from(b.ld_test_data(0, MemType::B32)[0]);
+    let y = Src::from(b.ld_test_data(4, MemType::B32)[0]);
+
+    let dst = b.uror(x, y);
+    b.st_test_data(8, MemType::B32, dst.into());
+
+    let bin = b.compile();
+
+    let mut a = Acorn::new();
+    let mut data = Vec::new();
+    for _ in 0..invocations {
+        data.push([a.get_u32(), a.get_u32() as u32, 0]);
+    }
+
+    run.run.run(&bin, &mut data).unwrap();
+
+    for d in &data {
+        let x = d[0];
+        let y = d[1];
+        let dst = x.rotate_right(y);
+        assert_eq!(d[2], dst as u32);
+    }
+}
+
+#[test]
 fn test_op_shr() {
     let sm = &RunSingleton::get().sm;
     if sm.sm() >= 70 {
@@ -1671,6 +1742,7 @@ fn test_op_ldsm() {
             order: MemOrder::Strong(MemScope::CTA),
             eviction_priority: MemEvictionPriority::Normal,
         },
+        stride: OffsetStride::X1,
     });
     b.push_op(OpMemBar {
         scope: MemScope::CTA,

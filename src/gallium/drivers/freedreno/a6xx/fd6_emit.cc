@@ -838,7 +838,7 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
 {
    struct fd_screen *screen = ctx->screen;
 
-   fd_ncrb<CHIP> ncrb(cs, 28 + ARRAY_SIZE(screen->info->magic_raw));
+   fd_ncrb<CHIP> ncrb(cs, 29 + ARRAY_SIZE(screen->info->magic_raw));
 
    if (CHIP == A7XX) {
       /* On A7XX, RB_CCU_CNTL was broken into two registers, RB_CCU_CNTL which has
@@ -870,6 +870,12 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
             value = (value & ~A6XX_TPL1_DBG_ECO_CNTL1_TP_UBWC_FLAG_HINT) |
                     (screen->info->props.enable_tp_ubwc_flag_hint
                         ? A6XX_TPL1_DBG_ECO_CNTL1_TP_UBWC_FLAG_HINT
+                        : 0);
+            break;
+         case REG_A6XX_SP_CHICKEN_BITS:
+            value = (value & ~A6XX_SP_CHICKEN_BITS_EOLM_ENABLE) |
+                    (screen->info->props.has_eolm_eogm
+                        ? A6XX_SP_CHICKEN_BITS_EOLM_ENABLE
                         : 0);
             break;
       }
@@ -918,6 +924,9 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
 
    if (CHIP == A7XX)
       ncrb.add(RB_UNKNOWN_8E09(CHIP, 0x7));
+
+   if (CHIP >= A7XX)
+      ncrb.add(RB_A2D_UNKNOWN_8C34(CHIP));
 }
 
 /**
@@ -931,7 +940,7 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
 {
    struct fd_screen *screen = ctx->screen;
 
-   fd_crb crb(cs, 80);
+   fd_crb crb(cs, 84);
 
    crb.add(SP_GFX_USIZE(CHIP));
    crb.add(A6XX_TPL1_PS_ROTATION_CNTL());
@@ -942,13 +951,6 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
    }
 
    crb.add(A6XX_SP_UNKNOWN_A9A8());
-
-   crb.add(A6XX_SP_MODE_CNTL(
-         .constant_demotion_enable = true,
-         .isammode = ISAMMODE_GL,
-         .shared_consts_enable = false,
-      )
-   );
 
    crb.add(A6XX_VFD_MODE_CNTL(.vertex = true, .instance = true));
    if (CHIP == A6XX)
@@ -990,13 +992,6 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
       crb.add(VPC_UNKNOWN_9210(CHIP));
    }
 
-   crb.add(A6XX_TPL1_MODE_CNTL(
-         .isammode = ISAMMODE_GL,
-         .texcoordroundmode = COORD_TRUNCATE,
-         .nearestmipsnap = CLAMP_ROUND_TRUNCATE,
-         .destdatatypeoverride = true,
-   ));
-
    crb.add(SP_REG_PROG_ID_3(
          CHIP,
          .linelengthregid = INVALID_REG,
@@ -1030,6 +1025,8 @@ fd6_emit_static_context_regs(struct fd_context *ctx, fd_cs &cs)
    crb.add(PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(CHIP));
 
    if (CHIP >= A7XX) {
+      crb.add(VPC_UNKNOWN_CNTL(CHIP));
+
       /* Blob sets these two per draw. */
       crb.add(PC_HS_BUFFER_SIZE(CHIP, FD6_TESS<CHIP>::PARAM_SIZE));
       /* Blob adds a bit more space ({0x10, 0x20, 0x30, 0x40} bytes)
@@ -1093,8 +1090,11 @@ fd6_emit_restore(fd_cs &cs, struct fd_batch *batch)
    }
 
    if (FD_DBG(STOMP)) {
-      fd6_emit_stomp<CHIP>(cs, &RP_BLIT_REGS<CHIP>[0], ARRAY_SIZE(RP_BLIT_REGS<CHIP>));
+      fd6_emit_stomp<CHIP>(cs, &DRAW_REGS<CHIP>[0], ARRAY_SIZE(DRAW_REGS<CHIP>));
+      fd6_emit_stomp<CHIP>(cs, &COMPUTE_REGS<CHIP>[0], ARRAY_SIZE(COMPUTE_REGS<CHIP>));
+      fd6_emit_stomp<CHIP>(cs, &BLIT_REGS<CHIP>[0], ARRAY_SIZE(BLIT_REGS<CHIP>));
       fd6_emit_stomp<CHIP>(cs, &CMD_REGS<CHIP>[0], ARRAY_SIZE(CMD_REGS<CHIP>));
+      fd6_emit_stomp<CHIP>(cs, &RESOLVE_REGS<CHIP>[0], ARRAY_SIZE(RESOLVE_REGS<CHIP>));
    }
 
    fd_pkt7(cs, CP_SET_MODE, 1)

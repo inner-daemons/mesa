@@ -1,27 +1,6 @@
 /*
  * Copyright (C) 2020 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- * Authors (Collabora):
- *      Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __BIFROST_COMPILER_H
@@ -566,6 +545,10 @@ typedef struct {
     * useless double fills */
    bool no_spill;
 
+   /* Tags the gl_PointSize memory write, this is used if we want to
+    * create a variant without psiz writes */
+   bool is_psiz_write;
+
    /* On Bifrost: A value of bi_table to override the table, inducing a
     * DTSEL_IMM pair if nonzero.
     *
@@ -632,6 +615,7 @@ typedef struct {
       bool format;               /* LEA_TEX */
       bool z_stencil;            /* LD_TILE */
       bool scheduling_barrier;   /* NOP */
+      unsigned blend_target;     /* BLEND */
 
       struct {
          enum bi_special special;   /* FADD_RSCALE, FMA_RSCALE */
@@ -653,6 +637,7 @@ typedef struct {
 
       struct {
          enum bi_seg seg;       /* LOAD, STORE, SEG_ADD, SEG_SUB */
+         enum va_memory_access mem_access; /* LOAD, STORE, LD_CVT, ST_CVT */
          bool preserve_null;    /* SEG_ADD, SEG_SUB */
          enum bi_extend extend; /* LOAD, IMUL */
       };
@@ -717,6 +702,8 @@ typedef struct {
          bool divzero;                /* FRSQ_APPROX, FRSQ */
       };
    };
+
+   const nir_instr_debug_info *debug_info;
 } bi_instr;
 
 /*
@@ -1087,7 +1074,6 @@ typedef struct {
    bi_block *break_block;
    bi_block *continue_block;
    bi_block **indexed_nir_blocks;
-   bool emitted_atest;
 
    /* During NIR->BIR, the coverage bitmap. If this is NULL, the default
     * coverage bitmap should be source from preloaded register r60. This is
@@ -1166,7 +1152,7 @@ enum bir_fau {
    BIR_FAU_WLS_PTR = 17,
    BIR_FAU_PROGRAM_COUNTER = 18,
 
-   /* Avalon only */
+   /* 5th Gen only */
    BIR_FAU_SHADER_OUTPUT = (1 << 9),
 
    BIR_FAU_UNIFORM = (1 << 7),
@@ -1214,6 +1200,21 @@ static inline bi_index
 bi_temp(bi_context *ctx)
 {
    return bi_get_index(ctx->ssa_alloc++);
+}
+
+static inline bi_index
+bi_temp_like(bi_context *ctx, bi_index idx)
+{
+   idx.value = ctx->ssa_alloc++;
+   /* Reset the fields which don't make sense on a destination.
+    * When the temp replaces a source, bi_replace_index copies these from the
+    * old index.
+    */
+   idx.abs = false;
+   idx.neg = false;
+   idx.swizzle = BI_SWIZZLE_H01;
+   idx.discard = false;
+   return idx;
 }
 
 static inline bi_index
@@ -1419,10 +1420,8 @@ void bi_calc_dominance(bi_context *ctx);
 bool bi_block_dominates(bi_block *parent, bi_block *child);
 
 void bi_print_instr(const bi_instr *I, FILE *fp);
+void bi_print_instr_impl(const bi_instr *I, FILE *fp);
 void bi_print_slots(bi_registers *regs, FILE *fp);
-void bi_print_tuple(bi_tuple *tuple, FILE *fp);
-void bi_print_clause(bi_clause *clause, FILE *fp);
-void bi_print_block(bi_block *block, FILE *fp);
 void bi_print_shader(bi_context *ctx, FILE *fp);
 
 /* BIR passes */
@@ -1494,8 +1493,19 @@ unsigned bi_calc_register_demand(bi_context *ctx);
 void bi_postra_liveness(bi_context *ctx);
 uint64_t MUST_CHECK bi_postra_liveness_ins(uint64_t live, bi_instr *ins);
 
-/* SSA spilling; returns number of spilled registers */
-unsigned bi_spill_ssa(bi_context *ctx, unsigned num_registers, unsigned tls_size);
+/* Record sizes of SSA values into the provided array. */
+void bi_record_sizes(bi_context *ctx, uint32_t *sizes);
+
+/* SSA spilling */
+void bi_spill_ssa(bi_context *ctx, unsigned num_registers);
+
+void bi_repair_ssa(bi_context *ctx);
+
+/* Reindex SSA to reduce memory usage */
+void bi_reindex_ssa(bi_context *ctx);
+
+/* Lower memory operands created during spilling. */
+unsigned bi_lower_spill(bi_context* ctx, uint32_t tls_base);
 
 /* Layout */
 
@@ -1700,6 +1710,7 @@ bi_before_function(bi_context *ctx)
 typedef struct {
    bi_context *shader;
    bi_cursor cursor;
+   const nir_instr_debug_info *debug_info;
 } bi_builder;
 
 static inline bi_builder

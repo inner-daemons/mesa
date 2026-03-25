@@ -27,8 +27,6 @@ kk_descriptor_state_fini(struct kk_cmd_buffer *cmd,
    for (unsigned i = 0; i < KK_MAX_SETS; i++) {
       vk_free(&pool->vk.alloc, desc->push[i]);
       desc->push[i] = NULL;
-      desc->sets[i] = NULL; /* We also need to set sets to NULL so state doesn't
-                               propagate if we reset it */
    }
 }
 
@@ -105,6 +103,8 @@ kk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    vk_command_buffer_reset(&cmd->vk);
    kk_cmd_release_resources(dev, cmd);
+
+   memset(&cmd->state, 0, sizeof(cmd->state));
 }
 
 const struct vk_command_buffer_ops kk_cmd_buffer_ops = {
@@ -181,13 +181,10 @@ kk_bind_descriptor_sets(struct kk_descriptor_state *desc,
     *
     * This means that, if some earlier set gets bound in such a way that
     * it changes set_dynamic_buffer_start[s], this binding is implicitly
-    * invalidated.  Therefore, we can always look at the current value
-    * of set_dynamic_buffer_start[s] as the base of our dynamic buffer
-    * range and it's only our responsibility to adjust all
-    * set_dynamic_buffer_start[p] for p > s as needed.
+    * invalidated.
     */
    uint8_t dyn_buffer_start =
-      desc->root.set_dynamic_buffer_start[info->firstSet];
+      pipeline_layout->dynamic_descriptor_offset[info->firstSet];
 
    uint32_t next_dyn_offset = 0;
    for (uint32_t i = 0; i < info->descriptorSetCount; ++i) {
@@ -212,26 +209,23 @@ kk_bind_descriptor_sets(struct kk_descriptor_state *desc,
          const struct kk_descriptor_set_layout *set_layout =
             vk_to_kk_descriptor_set_layout(pipeline_layout->set_layouts[s]);
 
-         if (set != NULL && set_layout->dynamic_buffer_count > 0) {
-            for (uint32_t j = 0; j < set_layout->dynamic_buffer_count; j++) {
+         if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
+            for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count;
+                 j++) {
                struct kk_buffer_address addr = set->dynamic_buffers[j];
                addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
                desc->root.dynamic_buffers[dyn_buffer_start + j] = addr;
             }
-            next_dyn_offset += set->layout->dynamic_buffer_count;
+            next_dyn_offset += set->layout->vk.dynamic_descriptor_count;
          }
 
-         dyn_buffer_start += set_layout->dynamic_buffer_count;
+         dyn_buffer_start += set_layout->vk.dynamic_descriptor_count;
       } else {
          assert(set == NULL);
       }
    }
    assert(dyn_buffer_start <= KK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= info->dynamicOffsetCount);
-
-   for (uint32_t s = info->firstSet + info->descriptorSetCount; s < KK_MAX_SETS;
-        s++)
-      desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
 
    desc->root_dirty = true;
 }
@@ -269,10 +263,10 @@ kk_cmd_push_descriptors(struct kk_cmd_buffer *cmd,
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
          return NULL;
       }
-      desc->push[set]->layout = set_layout;
    }
 
    /* Pushing descriptors replaces whatever sets are bound */
+   desc->push[set]->layout = set_layout;
    desc->sets[set] = NULL;
    desc->push_dirty |= BITFIELD_BIT(set);
 

@@ -198,7 +198,8 @@ rra_fill_accel_struct_header_common(const struct radv_physical_device *pdev, str
       /* TODO: calculate active primitives */
       .active_primitive_count = primitive_count,
       .geometry_description_count = header->geometry_count,
-      .interior_fp32_node_count = bvh_info->internal_nodes_size / sizeof(struct radv_bvh_box32_node),
+      .interior_fp32_node_count = bvh_info->box32_count,
+      .interior_fp16_node_count = bvh_info->box16_count,
       .leaf_node_count = primitive_count,
       .rt_driver_interface_version = 8 << 16,
       .rt_ip_version = pdev->info.rt_ip_version,
@@ -789,7 +790,7 @@ rra_map_accel_struct_data(struct rra_copy_context *ctx, uint32_t i)
    if (radv_GetEventStatus(ctx->device, data->build_event) != VK_EVENT_SET)
       return NULL;
 
-   if (data->buffer->memory) {
+   if (data->buffer && data->buffer->memory) {
       VkMemoryMapInfo memory_map_info = {
          .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
          .memory = data->buffer->memory,

@@ -374,7 +374,7 @@ ir3_nir_lower_to_explicit_input(nir_shader *shader,
     * HS uses a different primitive id, which starts at bit 16 in the header
     */
    if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
-       v->compiler->tess_use_shared)
+       v->compiler->info->props.tess_use_shared)
       state.local_primitive_id_start = 16;
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -571,7 +571,6 @@ lower_tess_ctrl_block(nir_block *block, nir_builder *b, struct state *state)
 
          gl_varying_slot location = nir_intrinsic_io_semantics(intr).location;
          if (is_tess_levels(location)) {
-            assert(intr->def.num_components == 1);
             address = load_tess_factor_base(b);
             offset = build_tessfactor_base(
                b, location, nir_intrinsic_component(intr), state);
@@ -602,8 +601,6 @@ lower_tess_ctrl_block(nir_block *block, nir_builder *b, struct state *state)
          if (is_tess_levels(location)) {
             uint32_t inner_levels, outer_levels, levels;
             tess_level_components(state, &inner_levels, &outer_levels);
-
-            assert(intr->src[0].ssa->num_components == 1);
 
             nir_if *nif = NULL;
             if (location != VARYING_SLOT_PRIMITIVE_ID) {
@@ -665,7 +662,13 @@ ir3_nir_lower_tess_ctrl(nir_shader *shader, struct ir3_shader_variant *v,
 
    build_primitive_map(shader, &state.map);
    memcpy(v->output_loc, state.map.loc, sizeof(v->output_loc));
-   v->output_size = state.map.stride;
+
+   /* Empirically, TCS outputs have to be aligned to 64 bytes,
+    * otherwise stale data may be read in rare cases. The exact
+    * reason is not clear, but tests and proprietary driver behavior
+    * strongly point at the need for 64 byte alignment.
+    */
+   v->output_size = ALIGN_POT(state.map.stride, 16);
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    assert(impl);
@@ -756,7 +759,6 @@ lower_tess_eval_block(nir_block *block, nir_builder *b, struct state *state)
 
          gl_varying_slot location = nir_intrinsic_io_semantics(intr).location;
          if (is_tess_levels(location)) {
-            assert(intr->def.num_components == 1);
             address = load_tess_factor_base(b);
             offset = build_tessfactor_base(
                b, location, nir_intrinsic_component(intr), state);

@@ -31,8 +31,7 @@
 #define NIR_SEARCH_MAX_COMM_OPS 8
 
 struct match_state {
-   bool inexact_match;
-   bool has_exact_alu;
+   unsigned fp_math_ctrl;
    uint8_t comm_op_direction;
    unsigned variables_seen;
 
@@ -290,22 +289,14 @@ match_value(const nir_algebraic_table *table,
          if (state->variables[var->variable].src.ssa != instr->src[src].src.ssa)
             return false;
 
-         for (unsigned i = 0; i < num_components; ++i) {
-            if (state->variables[var->variable].swizzle[i] != new_swizzle[i])
-               return false;
-         }
-
-         return true;
+         return !memcmp(state->variables[var->variable].swizzle, new_swizzle, num_components);
       } else {
          state->variables_seen |= (1 << var->variable);
-         state->variables[var->variable].src = instr->src[src].src;
+         nir_alu_src *dst = &state->variables[var->variable];
+         dst->src = instr->src[src].src;
 
-         for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; ++i) {
-            if (i < num_components)
-               state->variables[var->variable].swizzle[i] = new_swizzle[i];
-            else
-               state->variables[var->variable].swizzle[i] = 0;
-         }
+         memcpy(dst->swizzle, new_swizzle, num_components);
+         memset(dst->swizzle + num_components, 0, NIR_MAX_VEC_COMPONENTS - num_components);
 
          return true;
       }
@@ -333,6 +324,12 @@ match_value(const nir_algebraic_table *table,
             double val = nir_src_comp_as_float(instr->src[src].src,
                                                new_swizzle[i]);
             if (val != const_val->data.d)
+               return false;
+
+            /* The comparison above does not check the sign bit for 0.0,
+             * so do it manually.
+             */
+            if ((dui(val) == 0) != (dui(const_val->data.d) == 0))
                return false;
          }
          return true;
@@ -370,15 +367,6 @@ match_expression(const nir_algebraic_table *table, const nir_search_expression *
    if (expr->cond_index != -1 && !table->expression_cond[expr->cond_index](instr))
       return false;
 
-   if (expr->nsz && nir_alu_instr_is_signed_zero_preserve(instr))
-      return false;
-
-   if (expr->nnan && nir_alu_instr_is_nan_preserve(instr))
-      return false;
-
-   if (expr->ninf && nir_alu_instr_is_inf_preserve(instr))
-      return false;
-
    if (!nir_op_matches_search_op(instr->op, expr->opcode))
       return false;
 
@@ -386,10 +374,10 @@ match_expression(const nir_algebraic_table *table, const nir_search_expression *
        instr->def.bit_size != expr->value.bit_size)
       return false;
 
-   state->inexact_match = expr->inexact || expr->contract || state->inexact_match;
-   state->has_exact_alu = (instr->exact && !expr->ignore_exact) || state->has_exact_alu;
-   if (state->inexact_match && state->has_exact_alu)
+   if (expr->fp_math_ctrl_exclude & instr->fp_math_ctrl)
       return false;
+
+   state->fp_math_ctrl |= instr->fp_math_ctrl;
 
    assert(nir_op_infos[instr->op].num_inputs > 0);
 
@@ -407,10 +395,8 @@ match_expression(const nir_algebraic_table *table, const nir_search_expression *
          return false;
    } else {
       if (nir_op_infos[instr->op].output_size != 0) {
-         for (unsigned i = 0; i < num_components; i++) {
-            if (swizzle[i] != i)
-               return false;
-         }
+         if (memcmp(swizzle, identity_swizzle, num_components))
+            return false;
       }
    }
 
@@ -479,8 +465,7 @@ construct_value(nir_builder *build,
        * expression we are replacing has any exact values, the entire
        * replacement should be exact.
        */
-      alu->exact = state->has_exact_alu || expr->exact;
-      alu->fp_fast_math = nir_instr_as_alu(instr)->fp_fast_math;
+      alu->fp_math_ctrl = nir_op_valid_fp_math_ctrl(op, state->fp_math_ctrl | expr->fp_math_ctrl_add);
 
       for (unsigned i = 0; i < nir_op_infos[op].num_inputs; i++) {
          /* If the source is an explicitly sized source, then we need to reset
@@ -611,7 +596,7 @@ dump_value(const nir_algebraic_table *table, const nir_search_value *val)
    case nir_search_value_expression: {
       const nir_search_expression *expr = nir_search_value_as_expression(val);
       fprintf(stderr, "(");
-      if (expr->inexact)
+      if (expr->fp_math_ctrl_exclude & nir_fp_exact)
          fprintf(stderr, "~");
       switch (expr->opcode) {
 #define CASE(n)            \
@@ -688,7 +673,7 @@ nir_algebraic_update_automaton(nir_instr *new_instr,
    nir_instr_worklist_fini(&automaton_worklist);
 }
 
-static nir_def *
+static bool
 nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
                   const nir_search_state *search_state,
                   struct util_dynarray *states,
@@ -698,14 +683,8 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
                   nir_instr_worklist *algebraic_worklist,
                   struct exec_list *dead_instrs)
 {
-   uint8_t swizzle[NIR_MAX_VEC_COMPONENTS] = { 0 };
-
-   for (unsigned i = 0; i < instr->def.num_components; ++i)
-      swizzle[i] = i;
-
    struct match_state state;
-   state.inexact_match = false;
-   state.has_exact_alu = false;
+   state.fp_math_ctrl = nir_fp_fast_math;
    state.state = search_state;
    state.pass_op_table = table->pass_op_table;
    state.table = table;
@@ -725,13 +704,13 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
 
       if (match_expression(table, search, instr,
                            instr->def.num_components,
-                           swizzle, &state)) {
+                           identity_swizzle, &state)) {
          found = true;
          break;
       }
    }
    if (!found)
-      return NULL;
+      return false;
 
 #if 0
    fprintf(stderr, "matched: ");
@@ -787,18 +766,16 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
    /* Note that NIR builder will elide the MOV if it's a no-op, which may
     * allow more work to be done in a single pass through algebraic.
     */
-   nir_def *ssa_val =
-      nir_mov_alu(build, val, instr->def.num_components);
-   if (ssa_val->index == util_dynarray_num_elements(states, uint16_t)) {
+   nir_def *mov = nir_def_rewrite_uses_with_alu_src(build, &instr->def, val,
+                                                    instr->def.num_components);
+
+   if (mov) {
       util_dynarray_append_typed(states, uint16_t, 0);
-      nir_algebraic_automaton(nir_def_instr(ssa_val), states, table->pass_op_table);
+      nir_algebraic_automaton(nir_def_instr(mov), states, table->pass_op_table);
    }
 
-   /* Rewrite the uses of the old SSA value to the new one, and recurse
-    * through the uses updating the automaton's state.
-    */
-   nir_def_rewrite_uses(&instr->def, ssa_val);
-   nir_algebraic_update_automaton(nir_def_instr(ssa_val), algebraic_worklist,
+   /* Recurse through the uses updating the automaton's state. */
+   nir_algebraic_update_automaton(nir_def_instr(val.src.ssa), algebraic_worklist,
                                   states, table->pass_op_table);
 
    /* Nothing uses the instr any more, so drop it out of the program.  Note
@@ -810,7 +787,7 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
    nir_instr_remove(&instr->instr);
    exec_list_push_tail(dead_instrs, &instr->instr.node);
 
-   return ssa_val;
+   return true;
 }
 
 static bool
@@ -879,25 +856,16 @@ nir_algebraic_instr(nir_builder *build, nir_instr *instr,
 
    nir_alu_instr *alu = nir_instr_as_alu(instr);
 
-   unsigned bit_size = alu->def.bit_size;
-   const unsigned execution_mode =
-      build->shader->info.float_controls_execution_mode;
-   const bool ignore_inexact =
-      nir_alu_instr_is_signed_zero_inf_nan_preserve(alu) ||
-      nir_is_denorm_flush_to_zero(execution_mode, bit_size);
-
    int xform_idx = *util_dynarray_element(states, uint16_t,
                                           alu->def.index);
    for (const struct transform *xform = &table->transforms[table->transform_offsets[xform_idx]];
         xform->condition_offset != ~0;
         xform++) {
       if (condition_flags[xform->condition_offset] &&
-          !(table->values[xform->search].expression.inexact && ignore_inexact) &&
           nir_replace_instr(build, alu, state, states, table,
                             &table->values[xform->search].expression,
                             &table->values[xform->replace].value, worklist, dead_instrs)) {
-         if (state->range_ht->entries)
-            _mesa_hash_table_clear(state->range_ht, NULL);
+         nir_invalidate_fp_analysis_state(state->range_ht);
          if (state->numlsb_ht->entries)
             _mesa_hash_table_clear(state->numlsb_ht, NULL);
          return true;
@@ -926,8 +894,7 @@ nir_algebraic_impl(nir_function_impl *impl,
    }
    memset(states.data, 0, states.size);
 
-   struct hash_table range_ht;
-   _mesa_pointer_hash_table_init(&range_ht, NULL);
+   nir_fp_analysis_state range_ht = nir_create_fp_analysis_state(impl);
 
    struct hash_table numlsb_ht;
    _mesa_pointer_hash_table_init(&numlsb_ht, NULL);
@@ -979,7 +946,7 @@ nir_algebraic_impl(nir_function_impl *impl,
 
    nir_instr_worklist_fini(&worklist);
    _mesa_hash_table_fini(&numlsb_ht, NULL);
-   _mesa_hash_table_fini(&range_ht, NULL);
+   nir_free_fp_analysis_state(&range_ht);
    util_dynarray_fini(&states);
 
    return nir_progress(progress, impl, nir_metadata_control_flow);

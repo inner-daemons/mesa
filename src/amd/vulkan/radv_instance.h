@@ -43,7 +43,6 @@ struct radv_drirc {
       bool disable_dcc;
       bool disable_dcc_mips;
       bool disable_dcc_stores;
-      bool disable_depth_storage;
       bool disable_shrink_image_store;
       bool disable_sinking_load_input_fs;
       bool disable_tc_compat_htile_in_general;
@@ -70,6 +69,7 @@ struct radv_drirc {
       bool disable_ngg_gs;
       bool enable_unified_heap_on_apu;
       bool report_llvm9_version_string;
+      bool prefer_2d_swizzle_for_3d_storage;
       char *gfx12_hiz_wa;
    } performance;
 

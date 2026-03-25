@@ -10,7 +10,7 @@ tu_entrypoints = custom_target(
     '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'tu',
     '--include', 'adreno_common.xml.h',
     '--tmpl-prefix', 'tu', '--tmpl-param', 'chip CHIP',
-    '--tmpl-variants', '<A6XX>', '<A7XX>',
+    '--tmpl-variants', '<A6XX>', '<A7XX>', '<A8XX>',
     '--beta', with_vulkan_beta.to_string(),
     '--device-prefix', 'tu_rmv',
   ],
@@ -38,6 +38,7 @@ libtu_files = files(
   'tu_image.cc',
   'tu_knl.cc',
   'tu_lrz.cc',
+  'tu_nir_lower_demote_samples.cc',
   'tu_nir_lower_multiview.cc',
   'tu_nir_lower_ray_query.cc',
   'tu_pass.cc',
@@ -48,6 +49,8 @@ libtu_files = files(
   'tu_rmv.cc',
   'tu_shader.cc',
   'tu_suballoc.cc',
+  'tu_subsampled_image.cc',
+  'tu_tile_config.cc',
   'tu_util.cc',
 )
 

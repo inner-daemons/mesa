@@ -1,24 +1,6 @@
 /*
  * Copyright © 2014 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "intel_nir.h"
@@ -74,7 +56,7 @@ get_mul_for_src(nir_alu_src *src, unsigned num_components,
     * value and what they don't care about is the add.  Another reason is that
     * SPIR-V explicitly requires this behaviour.
     */
-   if (!alu || alu->exact)
+   if (!alu || nir_alu_instr_is_exact(alu))
       return NULL;
 
    switch (alu->op) {
@@ -160,7 +142,7 @@ intel_nir_opt_peephole_ffma_instr(nir_builder *b,
    if (add->op != nir_op_fadd)
       return false;
 
-   if (add->exact)
+   if (nir_alu_instr_is_exact(add))
       return false;
 
 
@@ -219,7 +201,7 @@ intel_nir_opt_peephole_ffma_instr(nir_builder *b,
       mul_src[0] = nir_fneg(b, mul_src[0]);
 
    nir_alu_instr *ffma = nir_alu_instr_create(b->shader, nir_op_ffma);
-   ffma->fp_fast_math = mul->fp_fast_math | add->fp_fast_math;
+   ffma->fp_math_ctrl = mul->fp_math_ctrl | add->fp_math_ctrl;
 
    for (unsigned i = 0; i < 2; i++) {
       ffma->src[i].src = nir_src_for_ssa(mul_src[i]);

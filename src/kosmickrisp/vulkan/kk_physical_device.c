@@ -17,7 +17,7 @@
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
 #include "util/disk_cache.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "git_sha1.h"
 
 #include "vulkan/wsi/wsi_common.h"
@@ -99,7 +99,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_extended_dynamic_state = true,
-      .EXT_extended_dynamic_state2 = false,
+      .EXT_extended_dynamic_state2 = true,
       .EXT_image_robustness = true,
       .EXT_inline_uniform_block = true,
       .EXT_pipeline_creation_cache_control = true,
@@ -108,7 +108,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_stencil_export = true,
       .EXT_subgroup_size_control = true,
-      .EXT_texel_buffer_alignment = false,
+      .EXT_texel_buffer_alignment = true,
       .EXT_texture_compression_astc_hdr = true,
       .EXT_tooling_info = true,
       .EXT_ycbcr_2plane_444_formats = true,
@@ -123,7 +123,9 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       /* Optional extensions */
       .KHR_calibrated_timestamps = true,
-      .KHR_shader_maximal_reconvergence = true,
+      /* Temporarily disabled due to failing tests in
+       * dEQP-VK.reconvergence.maximal.compute.nesting* */
+      .KHR_shader_maximal_reconvergence = false,
       .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
 #ifdef KK_USE_WSI_PLATFORM
@@ -134,6 +136,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       .EXT_calibrated_timestamps = true,
       .EXT_external_memory_metal = true,
+      .EXT_image_2d_view_of_3d = true,
       .EXT_load_store_op_none = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_shader_atomic_float = true,
@@ -142,6 +145,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .GOOGLE_decorate_string = true,
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
+      .KHR_external_fence_fd = true,
+      .KHR_external_semaphore_fd = true,
    };
 }
 
@@ -153,6 +158,7 @@ kk_get_device_features(
    *features = (struct vk_features){
       /* Vulkan 1.0 */
       .alphaToOne = true,
+      .depthBiasClamp = true,
       .depthClamp = true,
       .drawIndirectFirstInstance = true,
       .dualSrcBlend = true,
@@ -161,11 +167,13 @@ kk_get_device_features(
       .imageCubeArray = true,
       .independentBlend = true,
       .inheritedQueries = true,
+      .largePoints = true,
       .logicOp = true,
       .multiViewport = true,
       .occlusionQueryPrecise = true,
       .robustBufferAccess = true,
       .samplerAnisotropy = true,
+      .sampleRateShading = true,
       .shaderClipDistance = true,
       .shaderImageGatherExtended = true,
       .shaderInt16 = true,
@@ -181,6 +189,7 @@ kk_get_device_features(
       .textureCompressionASTC_LDR = true,
       .textureCompressionBC = true,
       .textureCompressionETC2 = true,
+      .vertexPipelineStoresAndAtomics = true,
 
       /* Vulkan 1.1 */
       .multiview = true,
@@ -242,6 +251,10 @@ kk_get_device_features(
       .bufferDeviceAddress = true,
       .computeFullSubgroups = true,
       .dynamicRendering = true,
+      .extendedDynamicState = true,
+      .extendedDynamicState2 = true,
+      .extendedDynamicState2LogicOp = false,
+      .extendedDynamicState2PatchControlPoints = false,
       .inlineUniformBlock = true,
       .maintenance4 = true,
       .pipelineCreationCacheControl = true,
@@ -253,11 +266,13 @@ kk_get_device_features(
       .shaderZeroInitializeWorkgroupMemory = true,
       .subgroupSizeControl = true,
       .synchronization2 = true,
+      .texelBufferAlignment = true,
       .textureCompressionASTC_HDR = true,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
 
       /* Vulkan 1.4 */
+      .pushDescriptor = true,
       .vertexAttributeInstanceRateDivisor = true,
       .vertexAttributeInstanceRateZeroDivisor = true,
 
@@ -268,7 +283,9 @@ kk_get_device_features(
       .shaderExpectAssume = true,
 
       /* VK_KHR_shader_maximal_reconvergence */
-      .shaderMaximalReconvergence = true,
+      /* Temporarily disabled due to failing tests in
+       * dEQP-VK.reconvergence.maximal.compute.nesting* */
+      .shaderMaximalReconvergence = false,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
@@ -282,6 +299,10 @@ kk_get_device_features(
       /* EXT_4444_formats */
       .formatA4R4G4B4 = true,
       .formatA4B4G4R4 = true,
+
+      /* EXT_image_2d_view_of_3d */
+      .image2DViewOf3D = true,
+      .sampler2DViewOf3D = true,
 
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,
@@ -332,7 +353,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .maxImageDimension3D = kk_image_max_dimension(VK_IMAGE_TYPE_3D),
       .maxImageDimensionCube = 16384,
       .maxImageArrayLayers = 2048,
-      .maxTexelBufferElements = 256 * 1024 * 1024,
+      .maxTexelBufferElements = 16384 * 16384,
       .maxUniformBufferRange = 65536,
       .maxStorageBufferRange = UINT32_MAX,
       .maxPushConstantsSize = KK_MAX_PUSH_SIZE,
@@ -426,9 +447,9 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .maxCullDistances = 8,
       .maxCombinedClipAndCullDistances = 8,
       .discreteQueuePriorities = 2,
-      .pointSizeRange = {1.0f, 1.0f},
+      .pointSizeRange = {1.0f, 511.0f},
       .lineWidthRange = {1.0f, 1.0f},
-      .pointSizeGranularity = 0.0f,
+      .pointSizeGranularity = 0.0625f,
       .lineWidthGranularity = 0.0f,
       .strictLines = false,
       .standardSampleLocations = true,
@@ -527,7 +548,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .maxSubgroupSize = 32,
       .maxComputeWorkgroupSubgroups = pdev->info.max_workgroup_invocations / 32,
       .requiredSubgroupSizeStages = 0,
-      .maxInlineUniformBlockSize = 1 << 16,
+      .maxInlineUniformBlockSize = KK_MAX_INLINE_UNIFORM_BLOCK_SIZE,
       .maxPerStageDescriptorInlineUniformBlocks = 32,
       .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 32,
       .maxDescriptorSetInlineUniformBlocks = 6 * 32,
@@ -715,18 +736,18 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
 {
    struct kk_instance *instance = kk_physical_device_instance(pdev);
 
-   struct mesa_sha1 sha_ctx;
-   _mesa_sha1_init(&sha_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-   _mesa_sha1_update(&sha_ctx, instance->driver_build_sha,
+   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                      sizeof(instance->driver_build_sha));
 
-   unsigned char sha[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&sha_ctx, sha);
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
 
-   STATIC_ASSERT(SHA1_DIGEST_LENGTH >= VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.pipelineCacheUUID, sha, VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.shaderBinaryUUID, sha, VK_UUID_SIZE);
+   STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
 }
 
 static void
@@ -821,6 +842,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
                                     &properties, &dispatch_table);
    if (result != VK_SUCCESS)
       goto fail_mtl_dev;
+
+   kk_physical_device_init_pipeline_cache(pdev);
 
    uint64_t sysmem_size_B = kk_get_sysmem_heap_size();
    if (sysmem_size_B == 0) {

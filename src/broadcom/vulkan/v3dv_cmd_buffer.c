@@ -22,11 +22,19 @@
  */
 
 #include "broadcom/common/v3d_csd.h"
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
 #include "util/perf/cpu_trace.h"
 #include "util/u_pack_color.h"
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
+
+#define V3D_VERSION 42
+#include "v3dv_format_table.h"
 
 float
 v3dv_get_aa_line_width(struct v3dv_pipeline *pipeline,
@@ -2069,17 +2077,17 @@ cmd_buffer_execute_outside_pass(struct v3dv_cmd_buffer *primary,
             return;
 
          if (pending_barrier.dst_mask) {
-            /* FIXME: do the same we do for primaries and only choose the
-             * relevant src masks.
-             */
-            job->serialize = pending_barrier.src_mask_graphics |
-                             pending_barrier.src_mask_transfer |
-                             pending_barrier.src_mask_compute;
-            if (pending_barrier.bcl_buffer_access ||
-                pending_barrier.bcl_image_access) {
+            const uint8_t prev_dst_mask = pending_barrier.dst_mask;
+            v3dv_job_apply_barrier_state(job, &pending_barrier);
+
+            if ((prev_dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                !(pending_barrier.dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                (pending_barrier.bcl_buffer_access ||
+                 pending_barrier.bcl_image_access)) {
                job->needs_bcl_sync = true;
+               pending_barrier.bcl_buffer_access = 0;
+               pending_barrier.bcl_image_access = 0;
             }
-            memset(&pending_barrier, 0, sizeof(pending_barrier));
          }
       }
 
@@ -3064,8 +3072,18 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
       v3d_X((&device->devinfo), cmd_buffer_emit_line_width)(cmd_buffer);
 
-   if (dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST &&
-       !job->emitted_default_point_size) {
+   /* There is a bug in V3D 4.2 hardware where a FIFO in the binner may
+    * overflow in some scenarios where geometry is dropped in the pipeline
+    * (for example, if using primitive discards). The work around requires the
+    * driver to emit any CLE command, which will trigger the binner to flush
+    * the FIFO. The recommendation is to emit a very small packet that is fast
+    * to process by the CLE hardware such as PointSize in between all draw
+    * calls to ensure this flush always happens and there is never a chance of
+    * overflowing the binner.
+    */
+   if ((dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST &&
+       !job->emitted_default_point_size) ||
+       device->devinfo.ver == 42) {
       v3d_X((&device->devinfo), cmd_buffer_emit_default_point_size)(cmd_buffer);
    }
 

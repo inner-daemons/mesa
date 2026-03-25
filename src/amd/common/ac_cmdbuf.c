@@ -218,23 +218,21 @@ ac_write_harvested_raster_configs(const struct radeon_info *info, struct ac_pm4_
 }
 
 static void
-ac_set_raster_config(const struct radeon_info *info, struct ac_pm4_state *pm4)
+ac_emit_raster_config(const struct radeon_info *info, struct ac_pm4_state *pm4)
 {
    const unsigned num_rb = MIN2(info->max_render_backends, 16);
    const uint64_t rb_mask = info->enabled_rb_mask;
-   unsigned raster_config, raster_config_1;
-
-   ac_get_raster_config(info, &raster_config, &raster_config_1, NULL);
 
    if (!rb_mask || util_bitcount64(rb_mask) >= num_rb) {
       /* Always use the default config when all backends are enabled
        * (or when we failed to determine the enabled backends).
        */
-      ac_pm4_set_reg(pm4, R_028350_PA_SC_RASTER_CONFIG, raster_config);
+      ac_pm4_set_reg(pm4, R_028350_PA_SC_RASTER_CONFIG, info->pa_sc_raster_config);
       if (info->gfx_level >= GFX7)
-         ac_pm4_set_reg(pm4, R_028354_PA_SC_RASTER_CONFIG_1, raster_config_1);
+         ac_pm4_set_reg(pm4, R_028354_PA_SC_RASTER_CONFIG_1, info->pa_sc_raster_config_1);
    } else {
-      ac_write_harvested_raster_configs(info, pm4, raster_config, raster_config_1);
+      ac_write_harvested_raster_configs(info, pm4, info->pa_sc_raster_config,
+                                        info->pa_sc_raster_config_1);
    }
 }
 
@@ -301,7 +299,7 @@ gfx6_init_graphics_preamble_state(const struct ac_preamble_state *state,
    }
 
    if (info->gfx_level <= GFX8) {
-      ac_set_raster_config(info, pm4);
+      ac_emit_raster_config(info, pm4);
 
       /* FIXME calculate these values somehow ??? */
       ac_pm4_set_reg(pm4, R_028A54_VGT_GS_PER_ES, SI_GS_PER_ES);
@@ -577,8 +575,10 @@ gfx10_init_graphics_preamble_state(const struct ac_preamble_state *state,
                   S_028C48_MAX_ALLOC_COUNT(info->pbb_max_alloc_count - gfx10_one) |
                   S_028C48_MAX_PRIM_PER_BATCH(1023));
    if (info->gfx_level >= GFX11) {
-      ac_pm4_set_reg(pm4, R_028C54_PA_SC_BINNER_CNTL_2,
-                     S_028C54_ENABLE_PING_PONG_BIN_ORDER(info->gfx_level >= GFX11_5));
+      /* Ping pong binning order is supported on GFX11.5 but it seems to
+       * cause rendering issues. Might be a hardware bug.
+       */
+      ac_pm4_set_reg(pm4, R_028C54_PA_SC_BINNER_CNTL_2, S_028C54_ENABLE_PING_PONG_BIN_ORDER(0));
    }
 
    /* Break up a pixel wave if it contains deallocs for more than
@@ -769,6 +769,7 @@ gfx12_init_graphics_preamble_state(const struct ac_preamble_state *state,
                   S_028B50_ACCUM_QUAD(128) |
                   S_028B50_DONUT_SPLIT_GFX9(24) |
                   S_028B50_TRAP_SPLIT(6));
+   ac_pm4_set_reg(pm4, R_028B98_PA_SC_HIS_INFO, S_028B98_SURFACE_ENABLE(0));
    ac_pm4_set_reg(pm4, R_028BC0_PA_SC_HISZ_RENDER_OVERRIDE, 0);
 
    ac_pm4_set_reg(pm4, R_028C40_PA_SC_BINNER_OUTPUT_TIMEOUT_COUNTER, 0x800);
@@ -985,6 +986,8 @@ ac_set_tracked_regs_to_clear_state(struct ac_tracked_regs *tracked_regs,
    tracked_regs->reg_value[AC_TRACKED_CB_DCC_CONTROL] = 0;
    tracked_regs->reg_value[AC_TRACKED_CB_COLOR_CONTROL] = 0;
 
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_VRS_OVERRIDE_CNTL] = 0;
+
    /* Set all cleared context registers to saved. */
    BITSET_SET_COUNT(tracked_regs->reg_saved_mask, 0, AC_NUM_TRACKED_CONTEXT_REGS);
 }
@@ -1025,11 +1028,11 @@ ac_cmdbuf_flush_vgt_streamout(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level
    } else if (gfx_level >= GFX7) {
       reg_strmout_cntl = R_0300FC_CP_STRMOUT_CNTL;
 
-      ac_cmdbuf_set_uconfig_reg(reg_strmout_cntl, 0);
+      ac_cmdbuf_set_ucfg_reg(reg_strmout_cntl, 0);
    } else {
       reg_strmout_cntl = R_0084FC_CP_STRMOUT_CNTL;
 
-      ac_cmdbuf_set_config_reg(reg_strmout_cntl, 0);
+      ac_cmdbuf_set_cfg_reg(reg_strmout_cntl, 0);
    }
 
    ac_cmdbuf_event_write(V_028A90_SO_VGTSTREAMOUT_FLUSH);

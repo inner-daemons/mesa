@@ -111,6 +111,8 @@ struct fdl_image_params {
    bool sparse;
 
    bool force_disable_linear_fallback;
+
+   uint32_t plane;
 };
 
 /**
@@ -174,6 +176,7 @@ struct fdl_layout {
    uint64_t size;       /* Size of the whole image, in bytes. */
    uint32_t base_align; /* Alignment of the base address, in bytes. */
    uint8_t pitchalign;  /* log2(pitchalign) */
+   uint32_t plane;
 };
 
 static inline uint32_t
@@ -374,6 +377,12 @@ struct fdl_view_args {
    enum pipe_format format;
    enum fdl_view_type type;
    enum fdl_chroma_location chroma_offsets[2];
+
+   uint32_t filter_width;
+   uint32_t filter_height;
+   uint32_t filter_center_x;
+   uint32_t filter_center_y;
+   uint32_t filter_num_phases;
 };
 
 #define FDL6_TEX_CONST_DWORDS 16
@@ -475,7 +484,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 template <chip CHIP>
 void
 fdl6_buffer_view_init(uint32_t *descriptor, enum pipe_format format,
-                      const uint8_t *swiz, uint64_t iova, uint32_t size);
+                      const uint8_t (&swiz)[4], uint64_t iova, uint32_t size,
+                      uint32_t struct_size_texels = 1);
 #endif
 
 #endif /* FREEDRENO_LAYOUT_H_ */

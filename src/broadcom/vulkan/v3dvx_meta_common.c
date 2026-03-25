@@ -21,13 +21,17 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
+#include "v3dv_format_table.h"
+#include "v3dvx_format_table.h"
 #include "v3dv_meta_common.h"
 
-#include "broadcom/common/v3d_macros.h"
 #include "broadcom/common/v3d_tfu.h"
 #include "broadcom/common/v3d_util.h"
-#include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
 struct rcl_clear_info {
@@ -65,12 +69,6 @@ emit_rcl_prologue(struct v3dv_job *job,
 #if V3D_VERSION >= 71
       config.log2_tile_width = log2_tile_size(tiling->tile_width);
       config.log2_tile_height = log2_tile_size(tiling->tile_height);
-      /* FIXME: ideallly we would like next assert on the packet header (as is
-       * general, so also applies to GL). We would need to expand
-       * gen_pack_header for that.
-       */
-      assert(config.log2_tile_width == config.log2_tile_height ||
-             config.log2_tile_width == config.log2_tile_height + 1);
 #endif
       config.internal_depth_type = fb->internal_depth_type;
    }
@@ -276,7 +274,7 @@ emit_linear_load(struct v3dv_cl *cl,
                  struct v3dv_bo *bo,
                  uint32_t offset,
                  uint32_t stride,
-                 uint32_t format)
+                 enum V3DX(Output_Image_Format) format)
 {
    cl_emit(cl, LOAD_TILE_BUFFER_GENERAL, load) {
       load.buffer_to_load = buffer;
@@ -295,7 +293,7 @@ emit_linear_store(struct v3dv_cl *cl,
                   uint32_t offset,
                   uint32_t stride,
                   bool msaa,
-                  uint32_t format)
+                  enum V3DX(Output_Image_Format) format)
 {
    cl_emit(cl, STORE_TILE_BUFFER_GENERAL, store) {
       store.buffer_to_store = RENDER_TARGET_0;
@@ -315,7 +313,7 @@ emit_linear_store(struct v3dv_cl *cl,
  * we need to load and store to/from a tile color buffer using a compatible
  * color format.
  */
-static uint32_t
+static enum V3DX(Output_Image_Format)
 choose_tlb_format(struct v3dv_meta_framebuffer *framebuffer,
                   VkImageAspectFlags aspect,
                   bool for_store,
@@ -627,7 +625,7 @@ emit_copy_layer_to_buffer_per_tile_list(struct v3dv_job *job,
    uint32_t buffer_offset = buffer->mem_offset + region->bufferOffset +
                             height * buffer_stride * layer_offset;
 
-   uint32_t format = choose_tlb_format(framebuffer,
+   enum V3DX(Output_Image_Format) format = choose_tlb_format(framebuffer,
                                        region->imageSubresource.aspectMask,
                                        true, true, false);
    bool msaa = image->vk.samples > VK_SAMPLE_COUNT_1_BIT;
@@ -771,7 +769,7 @@ emit_copy_buffer_per_tile_list(struct v3dv_job *job,
                                uint32_t dst_offset,
                                uint32_t src_offset,
                                uint32_t stride,
-                               uint32_t format)
+                               enum V3DX(Output_Image_Format) format)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -807,7 +805,7 @@ v3dX(meta_emit_copy_buffer)(struct v3dv_job *job,
                             uint32_t dst_offset,
                             uint32_t src_offset,
                             struct v3dv_meta_framebuffer *framebuffer,
-                            uint32_t format,
+                            enum V3DX(Output_Image_Format) format,
                             uint32_t item_size)
 {
    const uint32_t stride = job->frame_tiling.width * item_size;
@@ -824,7 +822,7 @@ v3dX(meta_emit_copy_buffer_rcl)(struct v3dv_job *job,
                                 uint32_t dst_offset,
                                 uint32_t src_offset,
                                 struct v3dv_meta_framebuffer *framebuffer,
-                                uint32_t format,
+                                enum V3DX(Output_Image_Format) format,
                                 uint32_t item_size)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
@@ -1222,7 +1220,7 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
    uint32_t buffer_offset =
       buffer->mem_offset + region->bufferOffset + height * buffer_stride * layer;
 
-   uint32_t format = choose_tlb_format(framebuffer, imgrsc->aspectMask,
+   enum V3DX(Output_Image_Format) format = choose_tlb_format(framebuffer, imgrsc->aspectMask,
                                        false, false, true);
 
    uint32_t image_layer = layer + (image->vk.image_type != VK_IMAGE_TYPE_3D ?

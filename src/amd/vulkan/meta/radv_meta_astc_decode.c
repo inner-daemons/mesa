@@ -17,7 +17,6 @@ decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_ivie
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_meta_state *state = &device->meta_state;
    struct vk_texcompress_astc_write_descriptor_buffer desc_buffer;
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
    VkFormat format = src_iview->image->vk.format;
    int blk_w = vk_format_get_blockwidth(format);
    int blk_h = vk_format_get_blockheight(format);
@@ -25,9 +24,6 @@ decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_ivie
    vk_texcompress_astc_fill_write_descriptor_buffer(&device->vk, state->astc_decode, &desc_buffer,
                                                     radv_image_view_to_handle(src_iview), layout,
                                                     radv_image_view_to_handle(dst_iview), format);
-
-   VK_FROM_HANDLE(radv_buffer, luts_buf, state->astc_decode->luts_buf);
-   radv_cs_add_buffer(device->ws, cs->b, luts_buf->bo);
 
    radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->astc_decode->p_layout,
                               VK_TEXCOMPRESS_ASTC_WRITE_DESC_SET_COUNT, desc_buffer.descriptors);
@@ -37,22 +33,14 @@ decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_ivie
    if (pipeline == VK_NULL_HANDLE)
       return;
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    bool is_3Dimage = (src_iview->image->vk.image_type == VK_IMAGE_TYPE_3D) ? true : false;
    int push_constants[5] = {offset->x / blk_w, offset->y / blk_h, extent->width + offset->x, extent->height + offset->y,
                             is_3Dimage};
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = device->meta_state.astc_decode->p_layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(push_constants),
-      .pValues = push_constants,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, device->meta_state.astc_decode->p_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                            sizeof(push_constants), push_constants);
 
    radv_CmdDispatchBase(radv_cmd_buffer_to_handle(cmd_buffer), 0, 0, offset->z, DIV_ROUND_UP(extent->width, blk_w * 2),
                         DIV_ROUND_UP(extent->height, blk_h * 2), extent->depth);
@@ -106,9 +94,6 @@ radv_meta_decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *ima
                       const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
 
    const bool is_3d = image->vk.image_type == VK_IMAGE_TYPE_3D;
    const uint32_t base_slice = is_3d ? offset.z : subresource->baseArrayLayer;
@@ -134,6 +119,4 @@ radv_meta_decode_astc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *ima
 
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }

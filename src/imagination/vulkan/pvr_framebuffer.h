@@ -77,11 +77,12 @@ VkResult PVR_PER_ARCH(render_state_setup)(
    uint32_t render_count,
    const struct pvr_renderpass_hwsetup_render *renders);
 
-#   define pvr_render_state_setup PVR_PER_ARCH(render_state_setup)
+#   define pvr_arch_render_state_setup PVR_PER_ARCH(render_state_setup)
 
 #endif
 
 void pvr_render_state_cleanup(struct pvr_device *device,
+                              const VkAllocationCallbacks *pAllocator,
                               const struct pvr_render_state *rstate);
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(pvr_framebuffer,

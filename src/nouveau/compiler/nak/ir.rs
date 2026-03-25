@@ -976,6 +976,20 @@ impl Src {
         self
     }
 
+    pub fn swizzle(mut self, src_swizzle: SrcSwizzle) -> Src {
+        // Since we only have xx, yy, and xy, for any composition of swizzles,
+        // the inner-most non-xy swizzle wins.
+        if matches!(self.src_swizzle, SrcSwizzle::None) {
+            self.src_swizzle = src_swizzle
+        }
+        self
+    }
+
+    pub fn without_swizzle(mut self) -> Src {
+        self.src_swizzle = SrcSwizzle::None;
+        self
+    }
+
     pub fn as_u32(&self, src_type: SrcType) -> Option<u32> {
         let u = match &self.src_ref {
             SrcRef::Zero => 0,
@@ -4621,14 +4635,30 @@ pub struct OpF2F {
     pub dst_type: FloatType,
     pub rnd_mode: FRndMode,
     pub ftz: bool,
-    /// For 16-bit up-conversions, take the high 16 bits of the source register.
     /// For 16-bit down-conversions, place the result into the upper 16 bits of
     /// the destination register
-    pub high: bool,
+    pub dst_high: bool,
     /// Round to the nearest integer rather than nearest float
     ///
     /// Not available on SM70+
     pub integer_rnd: bool,
+}
+
+impl OpF2F {
+    pub fn is_high(&self) -> bool {
+        if matches!(self.src_type, FloatType::F16) {
+            // OpF2F with the same source and destination types is only allowed
+            // pre-Volta and only with F32.
+            assert!(!matches!(self.dst_type, FloatType::F16));
+
+            matches!(self.src.src_swizzle, SrcSwizzle::Yy)
+        } else if matches!(self.dst_type, FloatType::F16) {
+            self.dst_high
+        } else {
+            assert!(!self.dst_high);
+            false
+        }
+    }
 }
 
 impl AsSlice<Src> for OpF2F {
@@ -4644,7 +4674,7 @@ impl AsSlice<Src> for OpF2F {
 
     fn attrs(&self) -> SrcTypeList {
         let src_type = match self.src_type {
-            FloatType::F16 => SrcType::F16,
+            FloatType::F16 => SrcType::F16v2,
             FloatType::F32 => SrcType::F32,
             FloatType::F64 => SrcType::F64,
         };
@@ -4681,6 +4711,9 @@ impl DisplayOp for OpF2F {
         }
         if self.integer_rnd {
             write!(f, ".int")?;
+        }
+        if self.dst_high {
+            write!(f, ".high")?;
         }
         write!(
             f,
@@ -6384,6 +6417,40 @@ impl DisplayOp for OpSuStGa {
 }
 impl_display_for_op!(OpSuStGa);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetStride {
+    X1 = 0,
+    X4 = 2,
+    X8 = 3,
+    X16 = 4,
+}
+
+impl fmt::Display for OffsetStride {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::X1 => return Ok(()),
+            Self::X4 => ".x4",
+            Self::X8 => ".x8",
+            Self::X16 => ".x16",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl TryFrom<u8> for OffsetStride {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::X1),
+            2 => Ok(Self::X4),
+            3 => Ok(Self::X8),
+            4 => Ok(Self::X16),
+            _ => Err("Unknown LdSt shift value {value}"),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpLd {
@@ -6392,17 +6459,22 @@ pub struct OpLd {
     #[src_type(GPR)]
     pub addr: Src,
 
+    /// On false the load returns 0
+    #[src_type(Pred)]
+    pub pred: Src,
+
     pub offset: i32,
+    pub stride: OffsetStride,
     pub access: MemAccess,
 }
 
 impl DisplayOp for OpLd {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ld{} [{}", self.access, self.addr)?;
+        write!(f, "ld{} [{}{}", self.access, self.addr, self.stride)?;
         if self.offset > 0 {
             write!(f, "+{:#x}", self.offset)?;
         }
-        write!(f, "]")
+        write!(f, "], {}", self.pred)
     }
 }
 impl_display_for_op!(OpLd);
@@ -6544,12 +6616,13 @@ pub struct OpSt {
     pub data: Src,
 
     pub offset: i32,
+    pub stride: OffsetStride,
     pub access: MemAccess,
 }
 
 impl DisplayOp for OpSt {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "st{} [{}", self.access, self.addr)?;
+        write!(f, "st{} [{}{}", self.access, self.addr, self.stride)?;
         if self.offset > 0 {
             write!(f, "+{:#x}", self.offset)?;
         }
@@ -6605,6 +6678,7 @@ pub struct OpAtom {
     pub atom_type: AtomType,
 
     pub addr_offset: i32,
+    pub addr_stride: OffsetStride,
 
     pub mem_space: MemSpace,
     pub mem_order: MemOrder,
@@ -6624,7 +6698,7 @@ impl DisplayOp for OpAtom {
         )?;
         write!(f, " [")?;
         if !self.addr.is_zero() {
-            write!(f, "{}", self.addr)?;
+            write!(f, "{}{}", self.addr, self.addr_stride)?;
         }
         if self.addr_offset > 0 {
             if !self.addr.is_zero() {
@@ -7159,22 +7233,107 @@ impl DisplayOp for OpCS2R {
 }
 impl_display_for_op!(OpCS2R);
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub enum IsbeAccessType {
+    Map,
+    Patch,
+    Primitive,
+    Attribute,
+}
+
+impl fmt::Display for IsbeAccessType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IsbeAccessType::Map => write!(f, "map"),
+            IsbeAccessType::Patch => write!(f, "patch"),
+            IsbeAccessType::Primitive => write!(f, "prim"),
+            IsbeAccessType::Attribute => write!(f, "attr"),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpIsberd {
     #[dst_type(GPR)]
     pub dst: Dst,
 
-    #[src_type(SSA)]
-    pub idx: Src,
+    #[src_type(GPR)]
+    pub offset: Src,
+
+    pub imm_offset: u16,
+    pub mem_type: MemType,
+    pub access_type: IsbeAccessType,
+    pub output: bool,
+    pub skew: bool,
 }
 
 impl DisplayOp for OpIsberd {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "isberd [{}]", self.idx)
+        write!(f, "isberd")?;
+
+        if self.output {
+            write!(f, ".o")?;
+        }
+
+        write!(f, ".{}", self.access_type)?;
+
+        if self.skew {
+            write!(f, ".skew")?;
+        }
+
+        write!(f, "{} {}", self.mem_type, self.dst)?;
+
+        if self.imm_offset != 0 {
+            write!(f, " [{}+0x{:x}]", self.offset, self.imm_offset)
+        } else {
+            write!(f, " [{}]", self.offset)
+        }
     }
 }
 impl_display_for_op!(OpIsberd);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpIsbewr {
+    #[src_type(GPR)]
+    pub offset: Src,
+
+    #[src_type(GPR)]
+    pub data: Src,
+
+    pub imm_offset: u16,
+    pub mem_type: MemType,
+    pub access_type: IsbeAccessType,
+    pub output: bool,
+    pub skew: bool,
+}
+
+impl DisplayOp for OpIsbewr {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "isbewr")?;
+
+        if self.output {
+            write!(f, ".o")?;
+        }
+
+        write!(f, ".{}", self.access_type)?;
+
+        if self.skew {
+            write!(f, ".skew")?;
+        }
+
+        write!(f, "{}", self.mem_type)?;
+        if self.imm_offset != 0 {
+            write!(f, " [{}+0x{:x}]", self.offset, self.imm_offset)?;
+        } else {
+            write!(f, " [{}]", self.offset)?;
+        }
+
+        write!(f, " {}", self.data)
+    }
+}
+impl_display_for_op!(OpIsbewr);
 
 /// Vertex Index Load
 /// (Only available in Kepler)
@@ -8020,6 +8179,7 @@ pub enum Op {
     TexDepBar(Box<OpTexDepBar>),
     CS2R(Box<OpCS2R>),
     Isberd(Box<OpIsberd>),
+    Isbewr(Box<OpIsbewr>),
     ViLd(Box<OpViLd>),
     Kill(Box<OpKill>),
     Nop(OpNop),
@@ -8205,6 +8365,7 @@ impl Op {
             | Op::TexDepBar(_)
             | Op::CS2R(_)
             | Op::Isberd(_)
+            | Op::Isbewr(_)
             | Op::ViLd(_)
             | Op::Kill(_)
             | Op::PixLd(_)
@@ -8387,6 +8548,7 @@ impl Op {
             | Op::TexDepBar(_)
             | Op::CS2R(_)
             | Op::Isberd(_)
+            | Op::Isbewr(_)
             | Op::ViLd(_)
             | Op::Kill(_)
             | Op::PixLd(_)
@@ -8782,6 +8944,7 @@ impl Instr {
             | Op::RegOut(_)
             | Op::Out(_)
             | Op::OutFinal(_)
+            | Op::Isbewr(_)
             | Op::Annotate(_) => false,
             Op::BMov(op) => !op.clear,
             _ => true,
@@ -9092,12 +9255,6 @@ impl Default for GeometryShaderInfo {
     }
 }
 
-#[derive(Debug)]
-pub struct TessellationInitShaderInfo {
-    pub per_patch_attribute_count: u8,
-    pub threads_per_patch: u8,
-}
-
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum TessellationDomain {
@@ -9114,20 +9271,24 @@ pub enum TessellationSpacing {
     FractionalEven = NAK_TS_SPACING_FRACT_EVEN,
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug)]
-pub enum TessellationPrimitives {
-    Points = NAK_TS_PRIMS_POINTS,
-    Lines = NAK_TS_PRIMS_LINES,
-    TrianglesCW = NAK_TS_PRIMS_TRIANGLES_CW,
-    TrianglesCCW = NAK_TS_PRIMS_TRIANGLES_CCW,
+#[derive(Debug)]
+pub struct TesselationCommonShaderInfo {
+    pub spacing: Option<TessellationSpacing>,
+    pub ccw: bool,
+    pub point_mode: bool,
+}
+
+#[derive(Debug)]
+pub struct TessellationInitShaderInfo {
+    pub per_patch_attribute_count: u8,
+    pub threads_per_patch: u8,
+    pub common: TesselationCommonShaderInfo,
 }
 
 #[derive(Debug)]
 pub struct TessellationShaderInfo {
     pub domain: TessellationDomain,
-    pub spacing: TessellationSpacing,
-    pub primitives: TessellationPrimitives,
+    pub common: TesselationCommonShaderInfo,
 }
 
 #[derive(Debug)]
@@ -9590,8 +9751,14 @@ impl IsbeSpaceSharingStateTracker {
     }
 
     pub fn visit_instr(&mut self, instr: &Instr) {
-        // Track attribute store. (XXX: ISBEWR)
-        self.has_attribute_store |= matches!(instr.op, Op::ASt(_));
+        // Track attribute store.
+        match &instr.op {
+            Op::ASt(_) => self.has_attribute_store = true,
+            Op::Isbewr(op) if op.access_type == IsbeAccessType::Attribute => {
+                self.has_attribute_store = true;
+            }
+            _ => {}
+        }
 
         // Track attribute load.
         if matches!(instr.op, Op::ALd(_) | Op::Isberd(_)) {

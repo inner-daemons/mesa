@@ -36,7 +36,7 @@ struct pvr_spm_scratch_buffer {
    uint64_t size;
 };
 
-uint64_t PVR_PER_ARCH(spm_scratch_buffer_calc_required_size)(
+uint64_t pvr_arch_spm_scratch_buffer_calc_required_size(
    const struct pvr_renderpass_hwsetup_render *renders,
    uint32_t render_count,
    uint32_t sample_count,
@@ -46,20 +46,25 @@ uint64_t PVR_PER_ARCH(spm_scratch_buffer_calc_required_size)(
    uint64_t dwords_per_pixel;
    uint64_t buffer_size;
 
-   /* If we're allocating an SPM scratch buffer we'll have a minimum of 1 output
-    * reg and/or tile_buffer.
+   uint32_t max_used_tile_buffers = 0;
+
+   /* The maximum number of output registers / tile buffer dwords it ever
+    * encountered when allocating space in the output registers and any tile
+    * buffers.
     */
-   uint32_t nr_tile_buffers = 1;
-   uint32_t nr_output_regs = 1;
+   uint32_t max_used_dwords = 1;
 
    for (uint32_t i = 0; i < render_count; i++) {
       const struct pvr_renderpass_hwsetup_render *hw_render = &renders[i];
 
-      nr_tile_buffers = MAX2(nr_tile_buffers, hw_render->tile_buffers_count);
-      nr_output_regs = MAX2(nr_output_regs, hw_render->output_regs_count);
+      max_used_tile_buffers = MAX2(max_used_tile_buffers, hw_render->tile_buffers_count);
+      max_used_dwords = MAX2(max_used_dwords, hw_render->output_regs_count);
    }
 
-   dwords_per_pixel = (uint64_t)sample_count * nr_output_regs * nr_tile_buffers;
+   /* Add one to the number of tile buffers to account for the output registers,
+    * which are always used 
+    */
+   dwords_per_pixel = (uint64_t)sample_count * max_used_dwords * (1 + max_used_tile_buffers);
 
    buffer_size = ALIGN_POT((uint64_t)framebuffer_width,
                            ROGUE_CR_PBE_WORD0_MRT0_LINESTRIDE_ALIGNMENT);
@@ -69,7 +74,7 @@ uint64_t PVR_PER_ARCH(spm_scratch_buffer_calc_required_size)(
    return buffer_size;
 }
 
-VkResult pvr_device_init_spm_load_state(struct pvr_device *device)
+VkResult pvr_arch_device_init_spm_load_state(struct pvr_device *device)
 {
    const struct pvr_device_info *dev_info = &device->pdevice->dev_info;
    uint32_t pds_texture_aligned_offsets[PVR_NUM_SPM_LOAD_SHADERS];
@@ -244,7 +249,7 @@ VkResult pvr_device_init_spm_load_state(struct pvr_device *device)
    return VK_SUCCESS;
 }
 
-void PVR_PER_ARCH(device_finish_spm_load_state)(struct pvr_device *device)
+void pvr_arch_device_finish_spm_load_state(struct pvr_device *device)
 {
    pvr_bo_suballoc_free(device->spm_load_state.pds_programs);
    pvr_bo_suballoc_free(device->spm_load_state.usc_programs);
@@ -310,11 +315,11 @@ static uint64_t pvr_spm_setup_pbe_state(
       .source_start = source_start,
    };
 
-   pvr_pbe_pack_state(dev_info,
-                      &surface_params,
-                      &render_params,
-                      pbe_state_words_out,
-                      pbe_reg_words_out);
+   pvr_arch_pbe_pack_state(dev_info,
+                           &surface_params,
+                           &render_params,
+                           pbe_state_words_out,
+                           pbe_reg_words_out);
 
    return (uint64_t)stride * framebuffer_size->height * sample_count *
           PVR_DW_TO_BYTES(dword_count);
@@ -452,7 +457,7 @@ static VkResult pvr_pds_pixel_event_program_create_and_upload(
  * This sets up an EOT program to store the render pass'es on-chip and
  * off-chip tile data to the SPM scratch buffer on the EOT event.
  */
-VkResult PVR_PER_ARCH(spm_init_eot_state)(
+VkResult pvr_arch_spm_init_eot_state(
    struct pvr_device *device,
    struct pvr_spm_eot_state *spm_eot_state,
    const struct pvr_render_state *rstate,
@@ -464,6 +469,7 @@ VkResult PVR_PER_ARCH(spm_init_eot_state)(
    };
    uint32_t pbe_state_words[PVR_MAX_COLOR_ATTACHMENTS]
                            [ROGUE_NUM_PBESTATE_STATE_WORDS];
+   uint64_t tile_buffer_addrs[PVR_MAX_COLOR_ATTACHMENTS] = {0};
    const struct pvr_device_info *dev_info = &device->pdevice->dev_info;
    uint32_t total_render_target_used = 0;
    struct pvr_pds_upload pds_eot_program;
@@ -548,13 +554,12 @@ VkResult PVR_PER_ARCH(spm_init_eot_state)(
       total_render_target_used++;
 
       /* Store off-chip tile data (i.e. tile buffers). */
+      const struct pvr_device_tile_buffer_state *tile_buffer_state =
+         &device->tile_buffer_state;
 
       for (uint32_t i = 0; i < hw_render->tile_buffers_count; i++) {
-         continue;
-         assert(!"Add support for tile buffers in EOT");
-         pvr_finishme("Add support for tile buffers in EOT");
-
          assert(total_render_target_used < PVR_MAX_COLOR_ATTACHMENTS);
+         assert(i < tile_buffer_state->buffer_count);
 
          mem_stored = pvr_spm_setup_pbe_state(
             dev_info,
@@ -565,6 +570,8 @@ VkResult PVR_PER_ARCH(spm_init_eot_state)(
             next_scratch_buffer_addr,
             pbe_state_words[total_render_target_used],
             spm_eot_state->pbe_reg_words[total_render_target_used]);
+
+         tile_buffer_addrs[total_render_target_used] = tile_buffer_state->buffers[i]->vma->dev_addr.addr;
 
          next_scratch_buffer_addr =
             PVR_DEV_ADDR_OFFSET(next_scratch_buffer_addr, mem_stored);
@@ -577,7 +584,11 @@ VkResult PVR_PER_ARCH(spm_init_eot_state)(
       .emit_count = total_render_target_used,
       .shared_words = false,
       .state_words = pbe_state_words[0],
+      .num_output_regs = hw_render->output_regs_count,
+      .msaa_samples = hw_render->sample_count,
    };
+
+   memcpy(props.tile_buffer_addrs, tile_buffer_addrs, sizeof(tile_buffer_addrs));
 
    eot = pvr_usc_eot(device->pdevice->pco_ctx, &props, dev_info);
    usc_temp_count = pco_shader_data(eot)->common.temps;
@@ -666,7 +677,7 @@ pvr_spm_setup_texture_state_words(struct pvr_device *device,
    format_swizzle = pvr_get_format_swizzle(info.format);
    memcpy(info.swizzle, format_swizzle, sizeof(info.swizzle));
 
-   result = pvr_pack_tex_state(device, &info, &image_descriptor);
+   result = pvr_arch_pack_tex_state(device, &info, &image_descriptor);
    if (result != VK_SUCCESS)
       return result;
 
@@ -746,7 +757,7 @@ static VkResult pvr_pds_bgnd_program_create_and_upload(
    return VK_SUCCESS;
 }
 
-VkResult PVR_PER_ARCH(spm_init_bgobj_state)(
+VkResult pvr_arch_spm_init_bgobj_state(
    struct pvr_device *device,
    struct pvr_spm_bgobj_state *spm_bgobj_state,
    const struct pvr_render_state *rstate,

@@ -816,14 +816,14 @@ pvr_pbe_setup_codegen_defaults(const struct pvr_device_info *dev_info,
    swizzle = pvr_get_format_swizzle(format);
    memcpy(surface_params->swizzle, swizzle, sizeof(surface_params->swizzle));
 
-   pvr_pbe_get_src_format_and_gamma(format,
-                                    PVR_PBE_GAMMA_NONE,
-                                    false,
-                                    &surface_params->source_format,
-                                    &surface_params->gamma);
+   pvr_arch_pbe_get_src_format_and_gamma(format,
+                                         PVR_PBE_GAMMA_NONE,
+                                         false,
+                                         &surface_params->source_format,
+                                         &surface_params->gamma);
 
    surface_params->is_normalized = pvr_vk_format_is_fully_normalized(format);
-   surface_params->pbe_packmode = pvr_get_pbe_packmode(format);
+   surface_params->pbe_packmode = pvr_arch_get_pbe_packmode(format);
    surface_params->nr_components = vk_format_get_nr_components(format);
 
    result = pvr_mem_layout_spec(dst,
@@ -1121,7 +1121,7 @@ static uint64_t pvr_pbe_byte_mask(const struct pvr_device_info *dev_info,
 {
    uint32_t flags = pvr_get_blit_flags(transfer_cmd);
 
-   assert(PVR_HAS_ERN(dev_info, 42064));
+   assert(PVR_HAS_ENHANCEMENT(dev_info, 42064));
 
    if (flags & PVR_TRANSFER_CMD_FLAGS_DSMERGE) {
       uint32_t mask = 0U;
@@ -1206,16 +1206,16 @@ static VkResult pvr_pbe_setup_emit(const struct pvr_transfer_cmd *transfer_cmd,
                                              staging_buffer + program.data_size,
                                              dev_info);
 
-   result =
-      pvr_cmd_buffer_upload_pds(transfer_cmd->cmd_buffer,
-                                staging_buffer,
-                                program.data_size,
-                                ROGUE_CR_EVENT_PIXEL_PDS_DATA_ADDR_ALIGNMENT,
-                                staging_buffer + program.data_size,
-                                program.code_size,
-                                ROGUE_CR_EVENT_PIXEL_PDS_CODE_ADDR_ALIGNMENT,
-                                ROGUE_CR_EVENT_PIXEL_PDS_DATA_ADDR_ALIGNMENT,
-                                &pds_upload);
+   result = pvr_arch_cmd_buffer_upload_pds(
+      transfer_cmd->cmd_buffer,
+      staging_buffer,
+      program.data_size,
+      ROGUE_CR_EVENT_PIXEL_PDS_DATA_ADDR_ALIGNMENT,
+      staging_buffer + program.data_size,
+      program.code_size,
+      ROGUE_CR_EVENT_PIXEL_PDS_CODE_ADDR_ALIGNMENT,
+      ROGUE_CR_EVENT_PIXEL_PDS_DATA_ADDR_ALIGNMENT,
+      &pds_upload);
    vk_free(&device->vk.alloc, staging_buffer);
    if (result != VK_SUCCESS)
       return result;
@@ -1277,7 +1277,7 @@ static VkResult pvr_pbe_setup(const struct pvr_transfer_cmd *transfer_cmd,
              .pbe_wordx_mrty[i * ROGUE_NUM_PBESTATE_REG_WORDS_FOR_TRANSFER];
       pbe_words = &pbe_setup_words[i * ROGUE_NUM_PBESTATE_STATE_WORDS];
 
-      if (PVR_HAS_ERN(dev_info, 42064))
+      if (PVR_HAS_ENHANCEMENT(dev_info, 42064))
          pbe_regs[2U] = 0UL;
 
       if (i == 0U) {
@@ -1300,13 +1300,13 @@ static VkResult pvr_pbe_setup(const struct pvr_transfer_cmd *transfer_cmd,
 
       pvr_pbe_setup_swizzle(transfer_cmd, state, &surf_params);
 
-      pvr_pbe_pack_state(dev_info,
-                         &surf_params,
-                         &render_params,
-                         pbe_words,
-                         pbe_regs);
+      pvr_arch_pbe_pack_state(dev_info,
+                              &surf_params,
+                              &render_params,
+                              pbe_words,
+                              pbe_regs);
 
-      if (PVR_HAS_ERN(dev_info, 42064)) {
+      if (PVR_HAS_ENHANCEMENT(dev_info, 42064)) {
          uint64_t temp_reg;
 
          pvr_csb_pack (&temp_reg, PBESTATE_REG_WORD2, reg) {
@@ -1438,14 +1438,14 @@ static VkResult pvr_isp_tiles(const struct pvr_device *device,
       reg.y = origin_y;
    }
 
-   pvr_setup_tiles_in_flight(dev_info,
-                             dev_runtime_info,
-                             pvr_cr_isp_aa_mode_type(samples),
-                             state->usc_pixel_width,
-                             state->pair_tiles != PVR_PAIRED_TILES_NONE,
-                             0,
-                             &isp_tiles_in_flight,
-                             &state->regs.usc_pixel_output_ctrl);
+   pvr_arch_setup_tiles_in_flight(dev_info,
+                                  dev_runtime_info,
+                                  pvr_cr_isp_aa_mode_type(samples),
+                                  state->usc_pixel_width,
+                                  state->pair_tiles != PVR_PAIRED_TILES_NONE,
+                                  0,
+                                  &isp_tiles_in_flight,
+                                  &state->regs.usc_pixel_output_ctrl);
 
    pvr_csb_pack (&state->regs.isp_ctl, CR_ISP_CTL, reg) {
       reg.process_empty_tiles = true;
@@ -1737,7 +1737,7 @@ static inline VkResult pvr_image_state_set_codegen_defaults(
    else
       info.type = VK_IMAGE_VIEW_TYPE_1D;
 
-   result = pvr_pack_tex_state(device, &info, &image_state);
+   result = pvr_arch_pack_tex_state(device, &info, &image_state);
    if (result != VK_SUCCESS)
       return result;
 
@@ -2241,10 +2241,10 @@ pvr_pds_unitex(const struct pvr_device_info *dev_info,
                 ROGUE_TA_STATE_PDS_SIZEINFO1_PDS_TEXTURESTATESIZE_UNIT_SIZE);
 
    result =
-      pvr_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
-                               ctx->device->heaps.pds_heap,
-                               PVR_DW_TO_BYTES(state->tex_state_data_size),
-                               &pvr_bo);
+      pvr_arch_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
+                                    ctx->device->heaps.pds_heap,
+                                    PVR_DW_TO_BYTES(state->tex_state_data_size),
+                                    &pvr_bo);
    if (result != VK_SUCCESS)
       return result;
 
@@ -2375,7 +2375,7 @@ static VkResult pvr_pack_clear_color(VkFormat format,
 {
    const uint32_t red_width =
       vk_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0U);
-   uint32_t pbe_pack_mode = pvr_get_pbe_packmode(format);
+   uint32_t pbe_pack_mode = pvr_arch_get_pbe_packmode(format);
    const bool pbe_norm = pvr_vk_format_is_fully_normalized(format);
 
    /* TODO: Use PBE Accum format NOT PBE pack format! */
@@ -2950,10 +2950,11 @@ static VkResult pvr_3d_copy_blit_core(struct pvr_transfer_ctx *ctx,
       unitex_prog.num_texture_dma_kicks = 1U;
       unitex_prog.num_uniform_dma_kicks = 0U;
 
-      result = pvr_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
-                                        device->heaps.general_heap,
-                                        PVR_DW_TO_BYTES(tex_state_dma_size_dw),
-                                        &pvr_bo);
+      result =
+         pvr_arch_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
+                                       device->heaps.general_heap,
+                                       PVR_DW_TO_BYTES(tex_state_dma_size_dw),
+                                       &pvr_bo);
       if (result != VK_SUCCESS)
          return result;
 
@@ -3132,7 +3133,7 @@ pvr_pds_coeff_task(struct pvr_transfer_ctx *ctx,
 
    pvr_pds_set_sizes_coeff_loading(&program);
 
-   result = pvr_cmd_buffer_alloc_mem(
+   result = pvr_arch_cmd_buffer_alloc_mem(
       transfer_cmd->cmd_buffer,
       ctx->device->heaps.pds_heap,
       PVR_DW_TO_BYTES(program.data_size + program.code_size),
@@ -3409,7 +3410,7 @@ static void pvr_isp_prim_block_pds_state(const struct pvr_device_info *dev_info,
          ALIGN_POT(state->common_ptr,
                    ROGUE_TA_STATE_PDS_SIZEINFO2_USC_SHAREDSIZE_UNIT_SIZE) /
          ROGUE_TA_STATE_PDS_SIZEINFO2_USC_SHAREDSIZE_UNIT_SIZE;
-      info.pds_tri_merge_disable = !PVR_HAS_ERN(dev_info, 42307);
+      info.pds_tri_merge_disable = !PVR_HAS_ENHANCEMENT(dev_info, 42307);
       info.pds_batchnum = 0U;
    }
    cs_ptr++;
@@ -4131,10 +4132,10 @@ static VkResult pvr_isp_ctrl_stream(const struct pvr_device_info *dev_info,
    total_stream_size = region_arrays_size + prim_blk_size;
 
    /* Allocate space for IPF control stream. */
-   result = pvr_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
-                                     ctx->device->heaps.transfer_frag_heap,
-                                     total_stream_size,
-                                     &pvr_cs_bo);
+   result = pvr_arch_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
+                                          ctx->device->heaps.transfer_frag_heap,
+                                          total_stream_size,
+                                          &pvr_cs_bo);
    if (result != VK_SUCCESS)
       return result;
 
@@ -4295,10 +4296,11 @@ static VkResult pvr_isp_ctrl_stream(const struct pvr_device_info *dev_info,
             unitex_pds_prog.num_uniform_dma_kicks = 0U;
 
             /* Allocate memory for DMA. */
-            result = pvr_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
-                                              ctx->device->heaps.general_heap,
-                                              tex_state_dma_size << 2U,
-                                              &pvr_bo);
+            result =
+               pvr_arch_cmd_buffer_alloc_mem(transfer_cmd->cmd_buffer,
+                                             ctx->device->heaps.general_heap,
+                                             tex_state_dma_size << 2U,
+                                             &pvr_bo);
             if (result != VK_SUCCESS)
                return result;
 
@@ -4524,7 +4526,7 @@ static VkResult pvr_isp_ctrl_stream(const struct pvr_device_info *dev_info,
          /* Fill blit count for custom mapping equals source blit count. While
           * normal blits use only one fill blit.
           */
-         if (state->custom_mapping.pass_count == 0 && source > num_sources) {
+         if (state->custom_mapping.pass_count == 0 || source >= num_sources) {
             fill_blit = false;
             source = 0;
          }
@@ -4852,62 +4854,72 @@ static bool pvr_double_stride(struct pvr_transfer_pass *pass, uint32_t stride)
       struct pvr_rect_mapping *mapping_a = &mappings[i];
       struct pvr_rect_mapping *mapping_b =
          &mappings[pass->sources[0].mapping_count + new_mapping];
-      int32_t mapping_a_src_rect_y1 =
-         mapping_a->src_rect.offset.y + mapping_a->src_rect.extent.height;
-      int32_t mapping_b_src_rect_y1 = mapping_a_src_rect_y1;
-      const bool dst_starts_odd_row = !!(mapping_a->dst_rect.offset.y & 1);
-      const bool dst_ends_odd_row =
-         !!((mapping_a->dst_rect.offset.y + mapping_a->dst_rect.extent.height) &
-            1);
-      const bool src_starts_odd_row = !!(mapping_a->src_rect.offset.y & 1);
-      const bool src_ends_odd_row =
-         !!((mapping_a->src_rect.offset.y + mapping_a->src_rect.extent.height) &
-            1);
+
+      int32_t a_src_rect_y0 = mapping_a->src_rect.offset.y;
+      int32_t a_src_rect_y1 = a_src_rect_y0 + mapping_a->src_rect.extent.height;
+      int32_t a_dst_rect_y0 = mapping_a->dst_rect.offset.y;
+      int32_t a_dst_rect_y1 = a_dst_rect_y0 + mapping_a->dst_rect.extent.height;
+
+      int32_t b_src_rect_y0 = a_src_rect_y0;
+      int32_t b_src_rect_y1 = a_src_rect_y1;
+      int32_t b_dst_rect_y0 = a_dst_rect_y0;
+      int32_t b_dst_rect_y1 = a_dst_rect_y1;
+
+      const bool dst_starts_odd_row = !!(a_dst_rect_y0 & 1);
+      const bool dst_ends_odd_row = !!(a_dst_rect_y1 & 1);
+      const bool src_starts_odd_row = !!(a_src_rect_y0 & 1);
+      const bool src_ends_odd_row = !!(a_src_rect_y1 & 1);
 
       assert(pass->sources[0].mapping_count + new_mapping <
              ARRAY_SIZE(pass->sources[0].mappings));
       *mapping_b = *mapping_a;
 
-      mapping_a->src_rect.offset.y = ALIGN_POT(mapping_a->src_rect.offset.y, 2);
+      a_src_rect_y0 = ALIGN_POT(a_src_rect_y0, 2);
       if (dst_starts_odd_row && !src_starts_odd_row)
-         mapping_a->src_rect.offset.y++;
+         a_src_rect_y0++;
       else if (!dst_starts_odd_row && src_starts_odd_row)
-         mapping_a->src_rect.offset.y--;
+         a_src_rect_y0--;
 
-      mapping_a_src_rect_y1 = ALIGN_POT(mapping_a_src_rect_y1, 2);
+      a_src_rect_y1 = ALIGN_POT(a_src_rect_y1, 2);
       if (dst_ends_odd_row && !src_ends_odd_row)
-         mapping_a_src_rect_y1++;
+         a_src_rect_y1++;
       else if (!dst_ends_odd_row && src_ends_odd_row)
-         mapping_a_src_rect_y1--;
+         a_src_rect_y1--;
 
-      mapping_a->src_rect.extent.height =
-         mapping_a_src_rect_y1 - mapping_a->src_rect.offset.y;
-
-      mapping_b->src_rect.offset.y = ALIGN_POT(mapping_b->src_rect.offset.y, 2);
+      b_src_rect_y0 = ALIGN_POT(b_src_rect_y0, 2);
       if (dst_starts_odd_row && src_starts_odd_row)
-         mapping_b->src_rect.offset.y--;
+         b_src_rect_y0--;
       else if (!dst_starts_odd_row && !src_starts_odd_row)
-         mapping_b->src_rect.offset.y++;
+         b_src_rect_y0++;
 
-      mapping_b_src_rect_y1 = ALIGN_POT(mapping_b_src_rect_y1, 2);
+      b_src_rect_y1 = ALIGN_POT(b_src_rect_y1, 2);
       if (dst_ends_odd_row && src_ends_odd_row)
-         mapping_b_src_rect_y1--;
+         b_src_rect_y1--;
       else if (!dst_ends_odd_row && !src_ends_odd_row)
-         mapping_b_src_rect_y1++;
-
-      mapping_b->src_rect.extent.height =
-         mapping_b_src_rect_y1 - mapping_b->src_rect.offset.y;
+         b_src_rect_y1++;
 
       /* Destination rectangles. */
-      mapping_a->dst_rect.offset.y = mapping_a->dst_rect.offset.y / 2;
-
+      a_dst_rect_y0 /= 2;
       if (dst_starts_odd_row)
-         mapping_a->dst_rect.offset.y++;
+         a_dst_rect_y0++;
+
+      a_dst_rect_y1 = (a_dst_rect_y1 + 1) / 2;
 
       mapping_b->dst_rect.offset.x += stride;
-      mapping_b->dst_rect.offset.y /= 2;
-      mapping_b->dst_rect.extent.height /= 2;
-      mapping_a->dst_rect.extent.height -= mapping_b->dst_rect.extent.height;
+      b_dst_rect_y0 /= 2;
+      b_dst_rect_y1 /= 2;
+
+      mapping_a->src_rect.offset.y = a_src_rect_y0;
+      mapping_a->src_rect.extent.height = a_src_rect_y1 - a_src_rect_y0;
+
+      mapping_a->dst_rect.offset.y = a_dst_rect_y0;
+      mapping_a->dst_rect.extent.height = a_dst_rect_y1 - a_dst_rect_y0;
+
+      mapping_b->src_rect.offset.y = b_src_rect_y0;
+      mapping_b->src_rect.extent.height = b_src_rect_y1 - b_src_rect_y0;
+
+      mapping_b->dst_rect.offset.y = b_dst_rect_y0;
+      mapping_b->dst_rect.extent.height = b_dst_rect_y1 - b_dst_rect_y0;
 
       if (!mapping_a->src_rect.extent.width ||
           !mapping_a->src_rect.extent.height) {
@@ -5713,7 +5725,7 @@ static VkResult pvr_3d_copy_blit(struct pvr_transfer_ctx *ctx,
       /* PBE byte mask could be used for DS merge with FastScale. Clearing the
        * other channel on a DS merge requires Clip blit.
        */
-      if (!PVR_HAS_ERN(dev_info, 42064) ||
+      if (!PVR_HAS_ENHANCEMENT(dev_info, 42064) ||
           ((transfer_cmd->flags & PVR_TRANSFER_CMD_FLAGS_FILL) != 0U)) {
          return pvr_reroute_to_clip(ctx,
                                     active_cmd,
@@ -6012,10 +6024,10 @@ static VkResult pvr_queue_transfer(struct pvr_transfer_ctx *ctx,
    return VK_SUCCESS;
 }
 
-VkResult PVR_PER_ARCH(transfer_job_submit)(struct pvr_transfer_ctx *ctx,
-                                           struct pvr_sub_cmd_transfer *sub_cmd,
-                                           struct vk_sync *wait_sync,
-                                           struct vk_sync *signal_sync)
+VkResult pvr_arch_transfer_job_submit(struct pvr_transfer_ctx *ctx,
+                                      struct pvr_sub_cmd_transfer *sub_cmd,
+                                      struct vk_sync *wait_sync,
+                                      struct vk_sync *signal_sync)
 {
    list_for_each_entry_safe (struct pvr_transfer_cmd,
                              transfer_cmd,

@@ -91,6 +91,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
+      .KHR_robustness2 = PAN_ARCH >= 10,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
@@ -112,9 +113,13 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_spirv_1_4 = PAN_ARCH >= 10,
       .KHR_storage_buffer_storage_class = true,
 #ifdef PANVK_USE_WSI_PLATFORM
+      .KHR_present_id = true,
       .KHR_present_id2 = true,
+      .KHR_present_wait = true,
       .KHR_present_wait2 = true,
       .KHR_swapchain = true,
+      .KHR_swapchain_mutable_format = true,
+      .KHR_swapchain_maintenance1 = true,
 #endif
       .KHR_synchronization2 = true,
       .KHR_timeline_semaphore = true,
@@ -129,8 +134,11 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_buffer_device_address = true,
       .EXT_calibrated_timestamps =
          device->kmod.dev->props.gpu_can_query_timestamp,
+      .EXT_conditional_rendering = PAN_ARCH >= 10,
+      .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
       .EXT_depth_bias_control = true,
+      .EXT_depth_clamp_control = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_enable = true,
       .EXT_depth_clip_control = true,
@@ -153,9 +161,14 @@ panvk_per_arch(get_physical_device_extensions)(
       /* EXT_image_drm_format_modifier depends on KHR_sampler_ycbcr_conversion */
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
+      .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
+      .EXT_legacy_dithering = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
+      .EXT_map_memory_placed = true,
+      .EXT_nested_command_buffer = PAN_ARCH >= 10,
+      .EXT_memory_budget = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_mutable_descriptor_type = PAN_ARCH >= 9,
       .EXT_multisampled_render_to_single_sampled = true,
@@ -163,6 +176,10 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
       .EXT_pipeline_robustness = true,
+#ifdef PANVK_USE_WSI_PLATFORM
+	  .EXT_present_timing =
+         device->kmod.dev->props.gpu_can_query_timestamp,
+#endif
       .EXT_private_data = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_provoking_vertex = true,
@@ -171,19 +188,25 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_sampler_filter_minmax = PAN_ARCH >= 10,
       .EXT_scalar_block_layout = true,
       .EXT_separate_stencil_usage = true,
-      .EXT_shader_module_identifier = true,
       .EXT_shader_demote_to_helper_invocation = true,
+      .EXT_shader_module_identifier = true,
       .EXT_shader_replicated_composites = true,
+      .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
       .EXT_subgroup_size_control = has_vk1_1,
+#ifdef PANVK_USE_WSI_PLATFORM
+      .EXT_swapchain_maintenance1 = true,
+#endif
       .EXT_texel_buffer_alignment = true,
+      .EXT_astc_decode_mode = PAN_ARCH >= 9,
       .EXT_texture_compression_astc_hdr = true,
       .EXT_tooling_info = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_vertex_input_dynamic_state = true,
       .EXT_ycbcr_2plane_444_formats = PAN_ARCH >= 10,
       .EXT_ycbcr_image_arrays = PAN_ARCH >= 10,
+      .EXT_zero_initialize_device_memory = true,
       .EXT_inline_uniform_block = true,
       .ANDROID_external_memory_android_hardware_buffer = has_gralloc,
       .ANDROID_native_buffer = has_gralloc,
@@ -191,8 +214,11 @@ panvk_per_arch(get_physical_device_extensions)(
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
 
+      .VALVE_mutable_descriptor_type = PAN_ARCH >= 9,
+
       .ARM_shader_core_builtins = true,
       .ARM_shader_core_properties = has_vk1_1,
+      .ARM_scheduling_controls = PAN_ARCH >= 10,
    };
 }
 
@@ -300,7 +326,7 @@ panvk_per_arch(get_physical_device_features)(
       .sparseBinding = has_sparse,
       .sparseResidencyBuffer = has_sparse,
       .sparseResidencyImage2D = has_sparse,
-      .sparseResidencyImage3D = false, /* https://gitlab.freedesktop.org/panfrost/mesa/-/issues/242 */
+      .sparseResidencyImage3D = has_sparse,
       .sparseResidency2Samples = false,
       .sparseResidency4Samples = false,
       .sparseResidency8Samples = false,
@@ -366,7 +392,9 @@ panvk_per_arch(get_physical_device_features)(
       .hostQueryReset = true,
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
-      .bufferDeviceAddressCaptureReplay = false,
+      /* only expose for CSF/panthor, and if we have extended VA ranges */
+      .bufferDeviceAddressCaptureReplay =
+         (PAN_ARCH >= 10) && (device->memory.max_supported_va > (1ull << 32)),
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -388,6 +416,10 @@ panvk_per_arch(get_physical_device_features)(
       .synchronization2 = true,
       .textureCompressionASTC_HDR = has_texture_compression_astc_hdr(device),
       .shaderZeroInitializeWorkgroupMemory = true,
+
+      /* VK_EXT_astc_decode_mode */
+      .decodeModeSharedExponent = false,
+
       .dynamicRendering = true,
       .shaderIntegerDotProduct = true,
       .maintenance4 = true,
@@ -439,6 +471,9 @@ panvk_per_arch(get_physical_device_features)(
       .floatRepresentation = false,
       .depthBiasExact = true,
 
+      /* VK_EXT_depth_clamp_control */
+      .depthClampControl = true,
+
       /* VK_EXT_depth_clip_control */
       .depthClipControl = true,
 
@@ -457,6 +492,13 @@ panvk_per_arch(get_physical_device_features)(
       .formatA4R4G4B4 = true,
       .formatA4B4G4R4 = true,
 
+      /* VK_EXT_color_write_enable */
+      .colorWriteEnable = true,
+
+      /* VK_EXT_conditional_rendering */
+      .conditionalRendering = PAN_ARCH >= 10,
+      .inheritedConditionalRendering = PAN_ARCH >= 10,
+
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
 
@@ -467,6 +509,9 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_image_2d_view_of_3d */
       .image2DViewOf3D = true,
       .sampler2DViewOf3D = true,
+
+      /* VK_EXT_image_view_min_lod */
+      .minLod = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
@@ -489,7 +534,7 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = PAN_ARCH >= 11,
       .robustImageAccess2 = false,
       .nullDescriptor = PAN_ARCH >= 10,
@@ -525,6 +570,19 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = PAN_ARCH >= 10,
 
+      /* VK_EXT_legacy_dithering */
+      .legacyDithering = true,
+
+      /* VK_EXT_nested_command_buffer */
+      .nestedCommandBuffer = PAN_ARCH >= 10,
+      .nestedCommandBufferRendering = PAN_ARCH >= 10,
+      .nestedCommandBufferSimultaneousUse = PAN_ARCH >= 10,
+
+      /* VK_EXT_map_memory_placed */
+      .memoryMapPlaced = true,
+      .memoryMapRangePlaced = false,
+      .memoryUnmapReserve = true,
+
       /* VK_EXT_non_seamless_cube_map */
       .nonSeamlessCubeMap = true,
 
@@ -533,12 +591,21 @@ panvk_per_arch(get_physical_device_features)(
       /* Video is not currently supported, so set to false */
       .unifiedImageLayoutsVideo = false,
 
+      /* VK_EXT_zero_initialize_device_memory */
+      .zeroInitializeDeviceMemory = true,
+
       /* VK_EXT_mutable_descriptor_type */
       .mutableDescriptorType = PAN_ARCH >= 9,
 
 #ifdef PANVK_USE_WSI_PLATFORM
+      /* VK_KHR_present_id */
+      .presentId = true,
+
       /* VK_KHR_present_id2 */
       .presentId2 = true,
+
+      /* VK_KHR_present_wait */
+      .presentWait = true,
 
       /* VK_KHR_present_wait2 */
       .presentWait2 = true,
@@ -550,8 +617,21 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_ARM_shader_core_builtins */
       .shaderCoreBuiltins = PAN_ARCH >= 9,
 
+      /* VK_ARM_scheduling_controls */
+      .schedulingControls = PAN_ARCH >= 10,
+
+      /* KHR_swapchain_maintenance1 */
+      .swapchainMaintenance1 = true,
+
       /* VK_EXT_multisampled_render_to_single_sampled */
       .multisampledRenderToSingleSampled = true,
+
+#ifdef PANVK_USE_WSI_PLATFORM
+      /* VK_EXT_present_timing */
+      .presentTiming = true,
+      .presentAtRelativeTime = true,
+      .presentAtAbsoluteTime = true,
+#endif
    };
 }
 
@@ -615,12 +695,7 @@ panvk_per_arch(get_physical_device_properties)(
       .driverVersion = vk_get_driver_version(),
       .vendorID =
          instance->force_vk_vendor ? instance->force_vk_vendor : ARM_VENDOR_ID,
-
-      /* Collect arch_major, arch_minor, arch_rev and product_major,
-       * as done by the Arm driver.
-       */
-      .deviceID = device->kmod.dev->props.gpu_id &
-                  (ARCH_MAJOR | ARCH_MINOR | ARCH_REV | PRODUCT_MAJOR),
+      .deviceID = device->kmod.dev->props.gpu_id,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
       /* Vulkan 1.0 limits */
@@ -641,12 +716,10 @@ panvk_per_arch(get_physical_device_properties)(
       .maxImageDimension3D = PAN_ARCH <= 10 ? (1 << 9) : (1 << 14),
       .maxImageDimensionCube = PAN_ARCH <= 10 ? (1 << 14) - 1 : (1 << 16),
       .maxImageArrayLayers = (1 << 16),
-      /* Currently Bifrost is limited by the 1D texture size, which is 2^16,
-         while pre-v11 is limited to 2^27 elements of 16 byte formats due to
+      /* Pre-v11 is limited to 2^27 elements of 16 byte formats due to
          size fields of 32 bits. */
-      .maxTexelBufferElements = PAN_ARCH >= 11  ? PANVK_MAX_BUFFER_SIZE
-                                : PAN_ARCH >= 9 ? (1 << 27)
-                                                : (1 << 16),
+      .maxTexelBufferElements =
+         PAN_ARCH >= 11 ? PANVK_MAX_BUFFER_SIZE : (1 << 27),
       /* Each uniform entry is 16-byte and the number of entries is encoded in a
        * 12-bit field, with the minus(1) modifier, which gives 2^20.
        */
@@ -986,8 +1059,8 @@ panvk_per_arch(get_physical_device_properties)(
       .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated = false,
       .storageTexelBufferOffsetAlignmentBytes = 64,
       .storageTexelBufferOffsetSingleTexelAlignment = false,
-      .uniformTexelBufferOffsetAlignmentBytes = PAN_ARCH >= 9 ? 4 : 64,
-      .uniformTexelBufferOffsetSingleTexelAlignment = PAN_ARCH >= 9,
+      .uniformTexelBufferOffsetAlignmentBytes = 4,
+      .uniformTexelBufferOffsetSingleTexelAlignment = true,
       .maxBufferSize = PANVK_MAX_BUFFER_SIZE,
 
       /* Vulkan 1.4 properties */
@@ -1025,7 +1098,7 @@ panvk_per_arch(get_physical_device_properties)(
       .pipelineBinaryPrecompiledInternalCache = has_disk_cache,
       .pipelineBinaryCompressedData = false,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustStorageBufferAccessSizeAlignment = 1,
       .robustUniformBufferAccessSizeAlignment = 1,
 
@@ -1061,6 +1134,12 @@ panvk_per_arch(get_physical_device_properties)(
       .graphicsPipelineLibraryFastLinking = true,
       .graphicsPipelineLibraryIndependentInterpolationDecoration = true,
 
+      /* VK_EXT_nested_command_buffer */
+      .maxCommandBufferNestingLevel = 5,
+
+      /* VK_EXT_map_memory_placed */
+      .minPlacedMemoryMapAlignment = os_page_size,
+
       /* VK_EXT_provoking_vertex */
       .provokingVertexModePerPipeline = false,
       .transformFeedbackPreservesTriangleFanProvokingVertex = false,
@@ -1078,6 +1157,10 @@ panvk_per_arch(get_physical_device_properties)(
       .shaderCoreCount = util_bitcount(device->kmod.dev->props.shader_present),
       .shaderWarpsPerCore = device->kmod.dev->props.max_threads_per_core /
                             (pan_subgroup_size(PAN_ARCH) * 2),
+
+      /* VK_ARM_scheduling_controls */
+      .schedulingControlsFlags =
+         VK_PHYSICAL_DEVICE_SCHEDULING_CONTROLS_SHADER_CORE_COUNT_ARM,
    };
 
    snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",
@@ -1134,6 +1217,7 @@ panvk_per_arch(get_physical_device_properties)(
       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       VK_IMAGE_LAYOUT_PREINITIALIZED,
+      VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT,
 
       /* Only if vk1.1+ is supported */
 #if PAN_ARCH >= 10

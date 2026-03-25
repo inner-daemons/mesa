@@ -922,9 +922,8 @@ void amdgpu_bo_slab_free(struct amdgpu_winsys *aws, struct pb_slab *slab)
 static void
 sparse_dump(struct amdgpu_bo_sparse *bo, const char *func)
 {
-   fprintf(stderr, "%s: %p (size=%"PRIu64", num_va_pages=%u) @ %s\n"
-                   "Commitments:\n",
-           __func__, bo, bo->b.base.size, bo->num_va_pages, func);
+   mesa_logi("%s: %p (size=%"PRIu64", num_va_pages=%u) @ %s\n"
+             "Commitments:\n", __func__, bo, bo->b.base.size, bo->num_va_pages, func);
 
    struct amdgpu_sparse_backing *span_backing = NULL;
    uint32_t span_first_backing_page = 0;
@@ -943,10 +942,9 @@ sparse_dump(struct amdgpu_bo_sparse *bo, const char *func)
       if (span_backing &&
           (backing != span_backing ||
            backing_page != span_first_backing_page + (va_page - span_first_va_page))) {
-         fprintf(stderr, " %u..%u: backing=%p:%u..%u\n",
-                 span_first_va_page, va_page - 1, span_backing,
-                 span_first_backing_page,
-                 span_first_backing_page + (va_page - span_first_va_page) - 1);
+         mesa_logi(" %u..%u: backing=%p:%u..%u\n", span_first_va_page, va_page - 1, span_backing,
+                   span_first_backing_page,
+                   span_first_backing_page + (va_page - span_first_va_page) - 1);
 
          span_backing = NULL;
       }
@@ -963,12 +961,12 @@ sparse_dump(struct amdgpu_bo_sparse *bo, const char *func)
       va_page++;
    }
 
-   fprintf(stderr, "Backing:\n");
+   mesa_logi("Backing:\n");
 
    list_for_each_entry(struct amdgpu_sparse_backing, backing, &bo->backing, list) {
-      fprintf(stderr, " %p (size=%"PRIu64")\n", backing, backing->bo->b.base.size);
+      mesa_logi(" %p (size=%"PRIu64")\n", backing, backing->bo->b.base.size);
       for (unsigned i = 0; i < backing->num_chunks; ++i)
-         fprintf(stderr, "   %u..%u\n", backing->chunks[i].begin, backing->chunks[i].end);
+         mesa_logi("   %u..%u\n", backing->chunks[i].begin, backing->chunks[i].end);
    }
 }
 #endif
@@ -1371,59 +1369,6 @@ out:
    simple_mtx_unlock(&bo->commit_lock);
 
    return ok;
-}
-
-static unsigned
-amdgpu_bo_find_next_committed_memory(struct pb_buffer_lean *buf,
-                                     uint64_t range_offset, unsigned *range_size)
-{
-   struct amdgpu_bo_sparse *bo = get_sparse_bo(amdgpu_winsys_bo(buf));
-   struct amdgpu_sparse_commitment *comm;
-   uint32_t va_page, end_va_page;
-   uint32_t span_va_page, start_va_page;
-   unsigned uncommitted_range_prev, uncommitted_range_next;
-
-   if (*range_size == 0)
-      return 0;
-
-   assert(*range_size + range_offset <= bo->b.base.size);
-
-   uncommitted_range_prev = uncommitted_range_next = 0;
-   comm = bo->commitments;
-   start_va_page = va_page = range_offset / RADEON_SPARSE_PAGE_SIZE;
-   end_va_page = (*range_size + range_offset) / RADEON_SPARSE_PAGE_SIZE;
-
-   simple_mtx_lock(&bo->commit_lock);
-   /* Lookup the first committed page with backing physical storage */
-   while (va_page < end_va_page && !comm[va_page].backing)
-      va_page++;
-
-   /* Fisrt committed page lookup failed, return early. */
-   if (va_page == end_va_page && !comm[va_page].backing) {
-      uncommitted_range_prev = *range_size;
-      *range_size = 0;
-      simple_mtx_unlock(&bo->commit_lock);
-      return uncommitted_range_prev;
-   }
-
-   /* Lookup the first uncommitted page without backing physical storage */
-   span_va_page = va_page;
-   while (va_page < end_va_page && comm[va_page].backing)
-      va_page++;
-   simple_mtx_unlock(&bo->commit_lock);
-
-   /* Calc byte count that need to skip before committed range */
-   if (span_va_page != start_va_page)
-      uncommitted_range_prev = span_va_page * RADEON_SPARSE_PAGE_SIZE - range_offset;
-
-   /* Calc byte count that need to skip after committed range */
-   if (va_page != end_va_page || !comm[va_page].backing) {
-      uncommitted_range_next = *range_size + range_offset - va_page * RADEON_SPARSE_PAGE_SIZE;
-   }
-
-   /* Calc size of first committed part */
-   *range_size = *range_size - uncommitted_range_next - uncommitted_range_prev;
-   return *range_size ? uncommitted_range_prev : uncommitted_range_prev + uncommitted_range_next;
 }
 
 static void amdgpu_buffer_get_metadata(struct radeon_winsys *rws,
@@ -2062,7 +2007,6 @@ void amdgpu_bo_init_functions(struct amdgpu_screen_winsys *sws)
    sws->base.buffer_has_vm_always_valid = amdgpu_bo_has_vm_always_valid;
    sws->base.buffer_get_handle = amdgpu_bo_get_handle;
    sws->base.buffer_commit = amdgpu_bo_sparse_commit;
-   sws->base.buffer_find_next_committed_memory = amdgpu_bo_find_next_committed_memory;
    sws->base.buffer_get_virtual_address = amdgpu_bo_get_va;
    sws->base.buffer_get_initial_domain = amdgpu_bo_get_initial_domain;
    sws->base.buffer_get_flags = amdgpu_bo_get_flags;

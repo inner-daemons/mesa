@@ -44,59 +44,11 @@
 #include "nir_format_convert.h"
 #include "nir_loop_analyze.h"
 
+#include "util/u_ycbcr.h"
+
 typedef struct nir_const_value_3_4 {
    nir_const_value v[3][4];
 } nir_const_value_3_4;
-
-static const nir_const_value_3_4 bt601_limited_range_csc_coeffs = { {
-   { { .f32 = 1.16438356f }, { .f32 = 1.16438356f }, { .f32 = 1.16438356f } },
-   { { .f32 = 0.0f }, { .f32 = -0.39176229f }, { .f32 = 2.01723214f } },
-   { { .f32 = 1.59602678f }, { .f32 = -0.81296764f }, { .f32 = 0.0f } },
-} };
-static const nir_const_value_3_4 bt601_full_range_csc_coeffs = { {
-   { { .f32 = 1.0f }, { .f32 = 1.0f }, { .f32 = 1.0f } },
-   { { .f32 = 0.0f }, { .f32 = -0.34413629f }, { .f32 = 1.772f } },
-   { { .f32 = 1.402f }, { .f32 = -0.71413629f }, { .f32 = 0.0f } },
-} };
-static const nir_const_value_3_4 bt709_limited_range_csc_coeffs = { {
-   { { .f32 = 1.16438356f }, { .f32 = 1.16438356f }, { .f32 = 1.16438356f } },
-   { { .f32 = 0.0f }, { .f32 = -0.21324861f }, { .f32 = 2.11240179f } },
-   { { .f32 = 1.79274107f }, { .f32 = -0.53290933f }, { .f32 = 0.0f } },
-} };
-static const nir_const_value_3_4 bt709_full_range_csc_coeffs = { {
-   { { .f32 = 1.0f }, { .f32 = 1.0f }, { .f32 = 1.0f } },
-   { { .f32 = 0.0f }, { .f32 = -0.18732427f }, { .f32 = 1.8556f } },
-   { { .f32 = 1.5748f }, { .f32 = -0.46812427f }, { .f32 = 0.0f } },
-} };
-static const nir_const_value_3_4 bt2020_limited_range_csc_coeffs = { {
-   { { .f32 = 1.16438356f }, { .f32 = 1.16438356f }, { .f32 = 1.16438356f } },
-   { { .f32 = 0.0f }, { .f32 = -0.18732610f }, { .f32 = 2.14177232f } },
-   { { .f32 = 1.67878795f }, { .f32 = -0.65046843f }, { .f32 = 0.0f } },
-} };
-static const nir_const_value_3_4 bt2020_full_range_csc_coeffs = { {
-   { { .f32 = 1.0f }, { .f32 = 1.0f }, { .f32 = 1.0f } },
-   { { .f32 = 0.0f }, { .f32 = -0.16455313f }, { .f32 = 1.88140000f } },
-   { { .f32 = 1.4747f }, { .f32 = -0.57139187f }, { .f32 = 0.0f } },
-} };
-
-static const float bt601_limited_range_csc_offsets[3] = {
-   -0.874202218f, 0.531667823f, -1.085630789f
-};
-static const float bt601_full_range_csc_offsets[3] = {
-   -0.701000000f, 0.529136286f, -0.886000000f
-};
-static const float bt709_limited_range_csc_offsets[3] = {
-   -0.972945075f, 0.301482665f, -1.133402218f
-};
-static const float bt709_full_range_csc_offsets[3] = {
-   -0.787400000f, 0.327724273f, -0.927800000f
-};
-static const float bt2020_limited_range_csc_offsets[3] = {
-   -0.915745075f, 0.347480639f, -1.148145075f
-};
-static const float bt2020_full_range_csc_offsets[3] = {
-   -0.737350000f, 0.367972500f, -0.940700000f
-};
 
 static bool
 project_src(nir_builder *b, nir_tex_instr *tex)
@@ -400,58 +352,50 @@ convert_yuv_to_rgb(nir_builder *b, nir_tex_instr *tex,
                    const nir_lower_tex_options *options,
                    unsigned texture_index)
 {
-
-   const float *offset_vals;
-   const nir_const_value_3_4 *m;
-   assert((options->bt709_external & options->bt2020_external) == 0);
-   if (options->yuv_full_range_external & (1u << texture_index)) {
-      if (options->bt709_external & (1u << texture_index)) {
-         m = &bt709_full_range_csc_coeffs;
-         offset_vals = bt709_full_range_csc_offsets;
-      } else if (options->bt2020_external & (1u << texture_index)) {
-         m = &bt2020_full_range_csc_coeffs;
-         offset_vals = bt2020_full_range_csc_offsets;
-      } else {
-         m = &bt601_full_range_csc_coeffs;
-         offset_vals = bt601_full_range_csc_offsets;
-      }
-   } else {
-      if (options->bt709_external & (1u << texture_index)) {
-         m = &bt709_limited_range_csc_coeffs;
-         offset_vals = bt709_limited_range_csc_offsets;
-      } else if (options->bt2020_external & (1u << texture_index)) {
-         m = &bt2020_limited_range_csc_coeffs;
-         offset_vals = bt2020_limited_range_csc_offsets;
-      } else {
-         m = &bt601_limited_range_csc_coeffs;
-         offset_vals = bt601_limited_range_csc_offsets;
-      }
+   unsigned bpc = 8;
+   if (options->lower_sx10_external & (1u << texture_index)) {
+      bpc = 10;
+   } else if (options->lower_sx12_external & (1u << texture_index)) {
+      bpc = 12;
    }
+   unsigned bpcs[3] = { bpc, bpc, bpc };
+
+   float range[3][2];
+   if (options->yuv_full_range_external & (1u << texture_index))
+      util_get_full_range_coeffs(range, bpcs);
+   else
+      util_get_narrow_range_coeffs(range, bpcs);
+
+   float mat[3][4];
+   assert((options->bt709_external & options->bt2020_external) == 0);
+   if (options->bt709_external & (1u << texture_index))
+      util_get_ycbcr_to_rgb_matrix(mat, util_ycbcr_bt709_coeffs);
+   else if (options->bt2020_external & (1u << texture_index))
+      util_get_ycbcr_to_rgb_matrix(mat, util_ycbcr_bt2020_coeffs);
+   else
+      util_get_ycbcr_to_rgb_matrix(mat, util_ycbcr_bt601_coeffs);
+   util_ycbcr_adjust_from_range(mat, range);
+
+   const nir_const_value_3_4 m = { {
+      { { .f32 = mat[0][0] }, { .f32 = mat[1][0] }, { .f32 = mat[2][0] } },
+      { { .f32 = mat[0][1] }, { .f32 = mat[1][1] }, { .f32 = mat[2][1] } },
+      { { .f32 = mat[0][2] }, { .f32 = mat[1][2] }, { .f32 = mat[2][2] } },
+   } };
 
    unsigned bit_size = tex->def.bit_size;
 
    nir_def *offset =
       nir_vec4(b,
-               nir_imm_floatN_t(b, offset_vals[0], a->bit_size),
-               nir_imm_floatN_t(b, offset_vals[1], a->bit_size),
-               nir_imm_floatN_t(b, offset_vals[2], a->bit_size),
+               nir_imm_floatN_t(b, mat[0][3], a->bit_size),
+               nir_imm_floatN_t(b, mat[1][3], a->bit_size),
+               nir_imm_floatN_t(b, mat[2][3], a->bit_size),
                a);
 
    offset = nir_f2fN(b, offset, bit_size);
 
-   nir_def *m0 = nir_f2fN(b, nir_build_imm(b, 4, 32, m->v[0]), bit_size);
-   nir_def *m1 = nir_f2fN(b, nir_build_imm(b, 4, 32, m->v[1]), bit_size);
-   nir_def *m2 = nir_f2fN(b, nir_build_imm(b, 4, 32, m->v[2]), bit_size);
-
-   if (options->lower_sx10_external & (1u << texture_index)) {
-      m0 = nir_fmul_imm(b, m0, 65535.0f / 1023.0f);
-      m1 = nir_fmul_imm(b, m1, 65535.0f / 1023.0f);
-      m2 = nir_fmul_imm(b, m2, 65535.0f / 1023.0f);
-   } else if (options->lower_sx12_external & (1u << texture_index)) {
-      m0 = nir_fmul_imm(b, m0, 65535.0f / 4095.0f);
-      m1 = nir_fmul_imm(b, m1, 65535.0f / 4095.0f);
-      m2 = nir_fmul_imm(b, m2, 65535.0f / 4095.0f);
-   }
+   nir_def *m0 = nir_f2fN(b, nir_build_imm(b, 4, 32, m.v[0]), bit_size);
+   nir_def *m1 = nir_f2fN(b, nir_build_imm(b, 4, 32, m.v[1]), bit_size);
+   nir_def *m2 = nir_f2fN(b, nir_build_imm(b, 4, 32, m.v[2]), bit_size);
 
    nir_def *result =
       nir_ffma(b, y, m0, nir_ffma(b, u, m1, nir_ffma(b, v, m2, offset)));
@@ -1180,33 +1124,15 @@ lower_tex_packing(nir_builder *b, nir_tex_instr *tex,
       static const unsigned bits[4] = { 16, 16, 16, 16 };
 
       switch (nir_alu_type_get_base_type(tex->dest_type)) {
-      case nir_type_float:
-         switch (nir_tex_instr_dest_size(tex)) {
-         case 1:
-            assert(tex->is_shadow && tex->is_new_style_shadow);
-            color = nir_unpack_half_2x16_split_x(b, nir_channel(b, color, 0));
-            break;
-         case 2: {
-            nir_def *rg = nir_channel(b, color, 0);
-            color = nir_vec2(b,
-                             nir_unpack_half_2x16_split_x(b, rg),
-                             nir_unpack_half_2x16_split_y(b, rg));
-            break;
-         }
-         case 4: {
-            nir_def *rg = nir_channel(b, color, 0);
-            nir_def *ba = nir_channel(b, color, 1);
-            color = nir_vec4(b,
-                             nir_unpack_half_2x16_split_x(b, rg),
-                             nir_unpack_half_2x16_split_y(b, rg),
-                             nir_unpack_half_2x16_split_x(b, ba),
-                             nir_unpack_half_2x16_split_y(b, ba));
-            break;
-         }
-         default:
-            UNREACHABLE("wrong dest_size");
-         }
+      case nir_type_float: {
+         unsigned num_comp = nir_tex_instr_dest_size(tex);
+
+         assert(num_comp != 1 || (tex->is_shadow && tex->is_new_style_shadow));
+
+         color = nir_extract_bits(b, &color, 1, 0, num_comp, 16);
+         color = nir_f2f32(b, color);
          break;
+      }
 
       case nir_type_int:
          color = nir_format_unpack_sint(b, color, bits, 4);

@@ -146,14 +146,14 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
       if (ycbcr_info) {
          if (ycbcr_info->n_planes > 1)
             features |= VK_FORMAT_FEATURE_DISJOINT_BIT;
-         else
-            features |= VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
 
+         features |= VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT |
+                     VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT;
          for (uint8_t plane = 0; plane < ycbcr_info->n_planes; plane++) {
             const struct vk_format_ycbcr_plane *plane_info = &ycbcr_info->planes[plane];
             if (plane_info->denominator_scales[0] > 1 ||
                 plane_info->denominator_scales[1] > 1)
-               features |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT;
+               features &= ~VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
          }
 
          /* The subsampled formats have no support for linear filters. */
@@ -492,15 +492,18 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_GetPhysicalDeviceImageFormatProperties2(
       VkExternalMemoryHandleTypeFlags compat_flags = 0;
 
       switch (external_info->handleType) {
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT: {
          int params = physical_device->pscreen->caps.dmabuf;
          flags = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-         if (params & DRM_PRIME_CAP_EXPORT)
-            flags |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
-
          export_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
          compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+         if (params & DRM_PRIME_CAP_EXPORT) {
+            flags |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+            compat_flags |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+         }
+
          break;
       }
 #endif
@@ -509,6 +512,13 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_GetPhysicalDeviceImageFormatProperties2(
          flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
          export_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
          compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
+         int params = physical_device->pscreen->caps.dmabuf;
+         if (params & DRM_PRIME_CAP_EXPORT)
+            compat_flags |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+#endif
+
          break;
 #endif
       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
@@ -663,7 +673,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceExternalBufferProperties(
    VkExternalMemoryHandleTypeFlags export_flags = 0;
    VkExternalMemoryHandleTypeFlags compat_flags = 0;
    switch (pExternalBufferInfo->handleType) {
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT: {
          VK_FROM_HANDLE(lvp_physical_device, physical_device, physicalDevice);
          int params = physical_device->pscreen->caps.dmabuf;

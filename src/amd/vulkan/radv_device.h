@@ -174,11 +174,6 @@ struct radv_device {
    struct radeon_winsys_bo *trace_bo;
    struct radv_trace_data *trace_data;
 
-   VkDeviceMemory va_validation_memory;
-   VkBuffer va_validation_buffer;
-   BITSET_WORD *valid_vas;
-   uint64_t valid_vas_addr;
-
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
 
@@ -208,9 +203,6 @@ struct radv_device {
    /* Whether to inline the compute dispatch size in user sgprs. */
    bool load_grid_size_from_user_sgpr;
 
-   /* Whether the driver uses a global BO list. */
-   bool use_global_bo_list;
-
    /* Whether anisotropy is forced with RADV_TEX_ANISO (-1 is disabled). */
    int force_aniso;
 
@@ -224,6 +216,16 @@ struct radv_device {
    bool sqtt_enabled;
    bool sqtt_triggered;
 
+   VkCommandBuffer sqtt_start_cmdbuf[2];
+   VkCommandBuffer sqtt_stop_cmdbuf[2];
+
+   uint64_t sqtt_size;
+   VkBuffer sqtt_buffer;
+   VkDeviceMemory sqtt_memory;
+
+   VkBuffer sqtt_staging_buffer;
+   VkDeviceMemory sqtt_staging_memory;
+
    /* SQTT timestamps for queue events. */
    simple_mtx_t sqtt_timestamp_mtx;
    struct radv_sqtt_timestamp sqtt_timestamp;
@@ -232,11 +234,20 @@ struct radv_device {
    simple_mtx_t sqtt_command_pool_mtx;
    struct vk_command_pool *sqtt_command_pool[2];
 
+   /* Whether to use a staging buffer for SQTT/SPM buffers. */
+   bool rgp_use_staging_buffer;
+
    /* Memory trace. */
    struct radv_memory_trace_data memory_trace;
 
    /* SPM. */
    struct ac_spm spm;
+
+   uint64_t spm_buffer_va;
+   VkBuffer spm_buffer;
+   VkDeviceMemory spm_memory;
+   VkBuffer spm_staging_buffer;
+   VkDeviceMemory spm_staging_memory;
 
    /* Radeon Raytracing Analyzer trace. */
    struct radv_rra_trace_data rra_trace;
@@ -297,7 +308,7 @@ struct radv_device {
    struct hash_table *rt_handles;
    simple_mtx_t rt_handles_mtx;
 
-   struct radv_printf_data printf;
+   struct radv_debug_nir debug_nir;
 
    struct radv_device_cache_key cache_key;
    blake3_hash cache_hash;
@@ -345,26 +356,6 @@ unsigned radv_get_default_max_sample_dist(int log_samples);
 
 void radv_emit_default_sample_locations(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
                                         int nr_samples);
-
-struct radv_color_buffer_info {
-   struct ac_cb_surface ac;
-};
-
-struct radv_ds_buffer_info {
-   struct ac_ds_surface ac;
-
-   uint32_t db_render_override2;
-   uint32_t db_render_control;
-};
-
-void radv_initialise_color_surface(struct radv_device *device, struct radv_color_buffer_info *cb,
-                                   struct radv_image_view *iview);
-
-void radv_initialise_vrs_surface(struct radv_image *image, struct radv_buffer *htile_buffer,
-                                 struct radv_ds_buffer_info *ds);
-
-void radv_initialise_ds_surface(const struct radv_device *device, struct radv_ds_buffer_info *ds,
-                                struct radv_image_view *iview, VkImageAspectFlags ds_aspects);
 
 void radv_gfx11_set_db_render_control(const struct radv_device *device, unsigned num_samples,
                                       unsigned *db_render_control);

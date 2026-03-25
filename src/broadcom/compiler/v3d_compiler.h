@@ -416,6 +416,7 @@ struct v3d_key {
         bool robust_uniform_access;
         bool robust_storage_access;
         bool robust_image_access;
+        bool robust_image_access_2;
 };
 
 struct v3d_fs_key {
@@ -429,6 +430,7 @@ struct v3d_fs_key {
         bool sample_alpha_to_one;
         bool can_earlyz_with_discard;
         bool software_blend;
+        bool ignore_sample_mask;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
         uint8_t swap_color_rb;
@@ -1218,6 +1220,7 @@ bool vir_opt_redundant_flags(struct v3d_compile *c);
 bool vir_opt_small_immediates(struct v3d_compile *c);
 bool vir_opt_vpm(struct v3d_compile *c);
 bool vir_opt_constant_alu(struct v3d_compile *c);
+bool vir_opt_alu(struct v3d_compile *c);
 bool v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);

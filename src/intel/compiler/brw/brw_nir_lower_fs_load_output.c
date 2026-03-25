@@ -18,7 +18,7 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
    if (intrin->intrinsic != nir_intrinsic_load_output)
       return false;
 
-   const struct brw_wm_prog_key *key = data;
+   const struct brw_fs_prog_key *key = data;
 
    const unsigned l = GET_FIELD(nir_intrinsic_base(intrin),
                                 BRW_NIR_FRAG_OUTPUT_LOCATION);
@@ -49,28 +49,21 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
 
    nir_def *coord = nir_vec(b, coords, 3);
 
-   nir_def *tex =
-      key->multisample_fbo == INTEL_NEVER ?
-      nir_build_tex(b, nir_texop_txf, coord,
-                    .texture_index = target,
-                    .dim = GLSL_SAMPLER_DIM_2D,
-                    .is_array = true,
-                    .dest_type = nir_type_uint32) :
-      nir_build_tex(b, nir_texop_txf_ms, coord,
-                    .texture_index = target,
-                    .dim = GLSL_SAMPLER_DIM_MS,
-                    .is_array = true,
-                    .ms_index = nir_load_sample_id(b),
-                    .dest_type = nir_type_uint32);
+   bool msaa = key->multisample_fbo != INTEL_NEVER;
+   nir_def *tex = nir_txf(b, coord,
+                          .texture_index = target,
+                          .ms_index = msaa ? nir_load_sample_id(b) : NULL,
+                          .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+                          .is_array = true,
+                          .dest_type = nir_type_uint32);
 
    nir_def_replace(&intrin->def, tex);
-
    return true;
 }
 
 bool
 brw_nir_lower_fs_load_output(nir_shader *shader,
-                             const struct brw_wm_prog_key *key)
+                             const struct brw_fs_prog_key *key)
 {
    return nir_shader_intrinsics_pass(shader,
                                      brw_nir_lower_fs_load_output_instr,

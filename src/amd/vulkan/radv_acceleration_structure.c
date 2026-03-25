@@ -75,6 +75,7 @@ enum radv_encode_key_bits {
    RADV_ENCODE_KEY_WRITE_LEAF_NODE_OFFSETS = (1 << 0),
    RADV_ENCODE_KEY_PAIR_COMPRESS_GFX12 = (1 << 1),
    RADV_ENCODE_KEY_BATCH_COMPRESS_GFX12 = (1 << 2),
+   RADV_ENCODE_KEY_USE_BOX16 = (1 << 3),
 };
 
 static void
@@ -187,10 +188,10 @@ radv_get_update_scratch_layout(struct radv_device *device, const struct vk_accel
                                struct update_scratch_layout *scratch)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-
    uint32_t internal_count = MAX2(state->leaf_node_count, 2) - 1;
-
    uint32_t offset = 0;
+
+   memset(scratch, 0, sizeof(*scratch));
 
    if (radv_use_bvh8(pdev)) {
       scratch->geometry_data_offset = offset;
@@ -198,9 +199,6 @@ radv_get_update_scratch_layout(struct radv_device *device, const struct vk_accel
 
       scratch->bounds_offsets = offset;
       offset += sizeof(vk_aabb) * internal_count;
-   } else {
-      scratch->bounds_offsets = offset;
-      offset += sizeof(vk_aabb) * state->leaf_node_count;
    }
 
    scratch->internal_ready_count_offset = offset;
@@ -287,6 +285,11 @@ radv_get_build_config(VkDevice _device, struct vk_acceleration_structure_build_s
    VK_FROM_HANDLE(radv_device, device, _device);
    struct radv_physical_device *pdev = radv_device_physical(device);
 
+   VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
+
+   if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+      state->config.internal_type = VK_INTERNAL_BUILD_TYPE_HPLOC;
+
    uint32_t encode_key = 0;
    if (radv_use_bvh8(pdev)) {
       /*
@@ -302,11 +305,13 @@ radv_get_build_config(VkDevice _device, struct vk_acceleration_structure_build_s
           state->build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
          encode_key |= RADV_ENCODE_KEY_WRITE_LEAF_NODE_OFFSETS;
 
-      VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
       if (!(state->build_info->flags & (VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR |
                                         VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR)) &&
           geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR)
          encode_key |= RADV_ENCODE_KEY_BATCH_COMPRESS_GFX12;
+   } else if (!radv_emulate_rt(pdev)) {
+      if (!(state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
+         encode_key |= RADV_ENCODE_KEY_USE_BOX16;
    }
 
    state->config.encode_key[0] = encode_key;
@@ -391,6 +396,8 @@ radv_build_flags(VkCommandBuffer commandBuffer, uint32_t key)
       flags |= RADV_BUILD_FLAG_PAIR_COMPRESS_TRIANGLES;
    if (key & RADV_ENCODE_KEY_BATCH_COMPRESS_GFX12)
       flags |= RADV_BUILD_FLAG_BATCH_COMPRESS_TRIANGLES;
+   if (key & RADV_ENCODE_KEY_USE_BOX16)
+      flags |= RADV_BUILD_FLAG_USE_BOX16;
 
    return flags;
 }
@@ -825,7 +832,6 @@ radv_update_as(VkCommandBuffer commandBuffer, const struct vk_acceleration_struc
    struct update_args update_consts = {
       .src = vk_acceleration_structure_get_va(src),
       .dst = vk_acceleration_structure_get_va(dst),
-      .leaf_bounds = state->build_info->scratchData.deviceAddress,
       .internal_ready_count = state->build_info->scratchData.deviceAddress + layout.internal_ready_count_offset,
       .leaf_node_count = state->leaf_node_count,
    };
@@ -1015,7 +1021,6 @@ radv_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t i
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
 
    VkResult result = radv_device_init_accel_struct_build_state(device);
    if (result != VK_SUCCESS) {
@@ -1023,15 +1028,15 @@ radv_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t i
       return;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
 
    cmd_buffer->state.current_event_type = EventInternalUnknown;
 
    vk_cmd_build_acceleration_structures(commandBuffer, &device->vk, &device->meta_state.device, infoCount, pInfos,
                                         ppBuildRangeInfos, &device->meta_state.accel_struct_build.build_args);
 
-   radv_meta_restore(&saved_state, cmd_buffer);
+   radv_meta_end(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1040,10 +1045,9 @@ radv_CmdCopyAccelerationStructureKHR(VkCommandBuffer commandBuffer, const VkCopy
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(vk_acceleration_structure, src, pInfo->src);
    VK_FROM_HANDLE(vk_acceleration_structure, dst, pInfo->dst);
-   struct radv_meta_saved_state saved_state;
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
 
    radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_BVH_COPY, copy_spv, sizeof(copy_spv),
                                 sizeof(struct copy_args), radv_build_flags(commandBuffer, 0) & RADV_BUILD_FLAG_BVH8);
@@ -1061,7 +1065,7 @@ radv_CmdCopyAccelerationStructureKHR(VkCommandBuffer commandBuffer, const VkCopy
    radv_CmdDispatchIndirect(commandBuffer, vk_buffer_to_handle(src->buffer),
                             src->offset + offsetof(struct radv_accel_struct_header, copy_dispatch_size));
 
-   radv_meta_restore(&saved_state, cmd_buffer);
+   radv_meta_end(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1085,10 +1089,9 @@ radv_CmdCopyMemoryToAccelerationStructureKHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(vk_acceleration_structure, dst, pInfo->dst);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   struct radv_meta_saved_state saved_state;
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
 
    radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_BVH_COPY, copy_spv, sizeof(copy_spv),
                                 sizeof(struct copy_args), radv_build_flags(commandBuffer, 0) & RADV_BUILD_FLAG_BVH8);
@@ -1113,7 +1116,7 @@ radv_CmdCopyMemoryToAccelerationStructureKHR(VkCommandBuffer commandBuffer,
       radv_CmdDispatchBase(commandBuffer, 0, 0, 0, 256, 1, 1);
    }
 
-   radv_meta_restore(&saved_state, cmd_buffer);
+   radv_meta_end(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1124,10 +1127,9 @@ radv_CmdCopyAccelerationStructureToMemoryKHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(vk_acceleration_structure, src, pInfo->src);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   struct radv_meta_saved_state saved_state;
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
+   radv_meta_begin(cmd_buffer);
+   radv_meta_save(cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
 
    radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_BVH_COPY, copy_spv, sizeof(copy_spv),
                                 sizeof(struct copy_args), radv_build_flags(commandBuffer, 0) & RADV_BUILD_FLAG_BVH8);
@@ -1156,7 +1158,7 @@ radv_CmdCopyAccelerationStructureToMemoryKHR(VkCommandBuffer commandBuffer,
       radv_CmdDispatchBase(commandBuffer, 0, 0, 0, 256, 1, 1);
    }
 
-   radv_meta_restore(&saved_state, cmd_buffer);
+   radv_meta_end(cmd_buffer);
 
    /* Set the header of the serialized data. */
    uint8_t header_data[2 * VK_UUID_SIZE];

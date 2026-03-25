@@ -43,7 +43,7 @@
 
 #include "shader_enums.h"
 
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 struct vk_pipeline_binary {
    struct vk_object_base base;
@@ -121,14 +121,15 @@ get_required_subgroup_size(const void *info_pNext)
 }
 
 void
-vk_set_subgroup_size(struct vk_device *device,
-                     nir_shader *shader,
+vk_set_subgroup_size(nir_shader *shader,
+                     uint32_t subgroup_size,
+                     uint32_t min_subgroup_size,
+                     uint32_t max_subgroup_size,
                      uint32_t spirv_version,
                      const void *info_pNext,
                      bool allow_varying,
                      bool require_full)
 {
-   struct vk_properties *properties = &device->physical->properties;
    uint32_t req_subgroup_size = get_required_subgroup_size(info_pNext);
    if (req_subgroup_size) {
       assert(util_is_power_of_two_nonzero(req_subgroup_size));
@@ -138,23 +139,23 @@ vk_set_subgroup_size(struct vk_device *device,
       shader->info.min_subgroup_size = req_subgroup_size;
    } else if (allow_varying || spirv_version >= 0x10600) {
       /* Starting with SPIR-V 1.6, varying subgroup size is the default */
-   } else if (properties->subgroupSize) {
-      shader->info.api_subgroup_size = properties->subgroupSize;
-      shader->info.max_subgroup_size = properties->subgroupSize;
+   } else if (subgroup_size) {
+      shader->info.api_subgroup_size = subgroup_size;
+      shader->info.max_subgroup_size = subgroup_size;
       if (require_full) {
          assert(shader->info.stage == MESA_SHADER_COMPUTE ||
                 shader->info.stage == MESA_SHADER_MESH ||
                 shader->info.stage == MESA_SHADER_TASK);
-         shader->info.min_subgroup_size = properties->subgroupSize;
+         shader->info.min_subgroup_size = subgroup_size;
       }
    }
 
-   if (properties->maxSubgroupSize) {
-      assert(properties->minSubgroupSize);
+   if (max_subgroup_size) {
+      assert(min_subgroup_size);
       shader->info.max_subgroup_size =
-         MIN2(shader->info.max_subgroup_size, properties->maxSubgroupSize);
+         MIN2(shader->info.max_subgroup_size, max_subgroup_size);
       shader->info.min_subgroup_size =
-         MAX2(shader->info.min_subgroup_size, properties->minSubgroupSize);
+         MAX2(shader->info.min_subgroup_size, min_subgroup_size);
    }
 
    assert(shader->info.max_subgroup_size >= shader->info.min_subgroup_size);
@@ -169,6 +170,7 @@ vk_pipeline_shader_stage_to_nir(struct vk_device *device,
                                 void *mem_ctx, nir_shader **nir_out)
 {
    VK_FROM_HANDLE(vk_shader_module, module, info->module);
+   const struct vk_properties *properties = &device->physical->properties;
    const mesa_shader_stage stage = vk_to_mesa_shader_stage(info->stage);
 
    assert(info->sType == VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
@@ -214,8 +216,8 @@ vk_pipeline_shader_stage_to_nir(struct vk_device *device,
       return vk_errorf(device, VK_ERROR_UNKNOWN, "spirv_to_nir failed");
 
    vk_set_subgroup_size(
-      device, nir,
-      vk_spirv_version(spirv_data, spirv_size),
+      nir, properties->subgroupSize, properties->minSubgroupSize,
+      properties->maxSubgroupSize, vk_spirv_version(spirv_data, spirv_size),
       info->pNext,
       info->flags & VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT,
       info->flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT);
@@ -306,12 +308,12 @@ void
 vk_pipeline_hash_shader_stage(VkPipelineCreateFlags2KHR pipeline_flags,
                               const VkPipelineShaderStageCreateInfo *info,
                               const struct vk_pipeline_robustness_state *rstate,
-                              unsigned char *stage_sha1)
+                              unsigned char *stage_blake3)
 {
    blake3_hash blake_hash;
 
    vk_pipeline_hash_shader_stage_blake3(pipeline_flags, info, rstate, blake_hash);
-   _mesa_sha1_compute(blake_hash, sizeof(blake_hash), stage_sha1);
+   _mesa_blake3_compute(blake_hash, sizeof(blake_hash), stage_blake3);
 }
 
 static VkPipelineRobustnessBufferBehaviorEXT
@@ -1363,6 +1365,7 @@ vk_get_graphics_pipeline_compile_info(struct vk_graphics_pipeline_compile_info *
    ASSERTED VkResult result = vk_graphics_pipeline_state_fill(device,
                                                      info->state,
                                                      pCreateInfo,
+                                                     NULL /* driver_mv */,
                                                      NULL /* driver_rp */,
                                                      0 /* driver_rp_flags */,
                                                      all_state,
@@ -1467,9 +1470,9 @@ vk_get_graphics_pipeline_compile_info(struct vk_graphics_pipeline_compile_info *
     * GPL optimized link.)
     */
    info->optimize =
-      libs_info == NULL ||
-      (pipeline_flags &
-       VK_PIPELINE_CREATE_2_LINK_TIME_OPTIMIZATION_BIT_EXT);
+      !device->disable_lto &&
+      (libs_info == NULL ||
+       (pipeline_flags & VK_PIPELINE_CREATE_2_LINK_TIME_OPTIMIZATION_BIT_EXT));
 
    /* Partition the shaders. Whenever pipelines are used,
     * vertex/geometry/fragment stages are always specified together, so should
@@ -1739,7 +1742,7 @@ vk_graphics_pipeline_compile_shaders(struct vk_device *device,
 
          if ((compile_info->part_stages[p] & VK_SHADER_STAGE_MESH_BIT_EXT) &&
              !(all_stages & VK_SHADER_STAGE_TASK_BIT_EXT))
-            shader_flags = VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT;
+            shader_flags |= VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT;
 
          VkShaderStageFlags next_stage;
          if (stage->stage == MESA_SHADER_FRAGMENT) {
@@ -3027,12 +3030,19 @@ vk_get_rt_pipeline_compile_info(struct vk_rt_pipeline_compile_info *info,
       };
 
       if (bin_info == NULL || bin_info->binaryCount == 0) {
-         vk_pipeline_hash_precomp_shader_stage(device, pipeline_flags,
-                                               pCreateInfo->pNext, stage_info,
-                                               &info->stages[i]);
+         vk_pipeline_hash_precomp_shader_stage(
+            device,
+            pipeline_flags &
+            ~VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR,
+            pCreateInfo->pNext, stage_info,
+            &info->stages[i]);
 
-         vk_pipeline_hash_rt_shader(device, pipeline_flags, pipeline_layout,
-                                    &info->stages[i]);
+         vk_pipeline_hash_rt_shader(
+            device,
+            pipeline_flags &
+            ~VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR,
+            pipeline_layout,
+            &info->stages[i]);
       }
    }
 
@@ -3673,6 +3683,19 @@ vk_create_rt_pipeline(struct vk_device *device,
          }
          group->stage_count++;
          assert(group->stages[s].shader != NULL);
+      }
+
+      /* Activate replay if needed */
+      if (pipeline_flags &
+          VK_PIPELINE_CREATE_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR) {
+         const struct vk_device_shader_ops *ops = device->shader_ops;
+         struct vk_shader *shaders[3] = {0};
+         for (uint32_t s = 0; s < group->stage_count; s++)
+            shaders[s] = group->stages[s].shader;
+         ops->replay_rt_shader_group(
+            device, group_info->type,
+            group->stage_count, shaders,
+            group_info->pShaderGroupCaptureReplayHandle);
       }
 
       pipeline->group_count++;

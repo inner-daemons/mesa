@@ -54,7 +54,7 @@ get_fill_memory_pipeline(struct radv_device *device, uint64_t size, VkPipeline *
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = radv_meta_nir_build_fill_memory_shader(device, use_16B_copy ? 16 : 4);
+   nir_shader *cs = radv_meta_nir_build_fill_memory_shader(use_16B_copy ? 16 : 4);
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -123,7 +123,7 @@ get_copy_memory_pipeline(struct radv_device *device, uint64_t src_va, uint64_t d
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = radv_meta_nir_build_copy_memory_shader(device, use_16B_copy ? 16 : 1);
+   nir_shader *cs = radv_meta_nir_build_copy_memory_shader(use_16B_copy ? 16 : 1);
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -151,7 +151,6 @@ static void
 radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, uint32_t data)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
    VkPipelineLayout layout;
    VkPipeline pipeline;
    VkResult result;
@@ -162,9 +161,7 @@ radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64
       return;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    assert(size <= UINT32_MAX);
 
@@ -182,20 +179,9 @@ radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64
       dim_x = DIV_ROUND_UP(size, 4);
    }
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(fill_consts),
-      .pValues = &fill_consts,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fill_consts), &fill_consts);
 
    radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
 
 static void
@@ -203,7 +189,6 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const bool use_16B_copy = size >= 16 && radv_is_copy_memory_4B_aligned(src_va, dst_va, size);
-   struct radv_meta_saved_state saved_state;
    VkPipelineLayout layout;
    VkPipeline pipeline;
    VkResult result;
@@ -214,9 +199,7 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
       return;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    assert(size <= UINT32_MAX);
 
@@ -234,20 +217,9 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
       dim_x = size;
    }
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(copy_consts),
-      .pValues = &copy_consts,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_consts), &copy_consts);
 
    radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
 
 static bool
@@ -315,13 +287,9 @@ uint32_t
 radv_fill_image(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image, uint64_t offset, uint64_t size,
                 uint32_t value)
 {
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const uint64_t va = image->bindings[0].addr + offset;
    struct radeon_winsys_bo *bo = image->bindings[0].bo;
    const enum radv_copy_flags copy_flags = radv_get_copy_flags_from_bo(bo);
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
-
-   radv_cs_add_buffer(device->ws, cs->b, bo);
 
    return radv_fill_memory_internal(cmd_buffer, image, va, size, value, copy_flags);
 }
@@ -330,11 +298,7 @@ uint32_t
 radv_fill_buffer(struct radv_cmd_buffer *cmd_buffer, struct radeon_winsys_bo *bo, uint64_t va, uint64_t size,
                  uint32_t value)
 {
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const enum radv_copy_flags copy_flags = radv_get_copy_flags_from_bo(bo);
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
-
-   radv_cs_add_buffer(device->ws, cs->b, bo);
 
    return radv_fill_memory(cmd_buffer, va, size, value, copy_flags);
 }
@@ -348,9 +312,13 @@ radv_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSi
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
+   radv_meta_begin(cmd_buffer);
+
    fillSize = vk_buffer_range(&dst_buffer->vk, dstOffset, fillSize) & ~3ull;
 
    radv_fill_buffer(cmd_buffer, dst_buffer->bo, vk_buffer_address(&dst_buffer->vk, dstOffset), fillSize, data);
+
+   radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
 }
@@ -379,16 +347,13 @@ radv_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCop
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_buffer, src_buffer, pCopyBufferInfo->srcBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, pCopyBufferInfo->dstBuffer);
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
 
    const enum radv_copy_flags src_copy_flags = radv_get_copy_flags_from_bo(src_buffer->bo);
    const enum radv_copy_flags dst_copy_flags = radv_get_copy_flags_from_bo(dst_buffer->bo);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
-   radv_cs_add_buffer(device->ws, cs->b, src_buffer->bo);
-   radv_cs_add_buffer(device->ws, cs->b, dst_buffer->bo);
+   radv_meta_begin(cmd_buffer);
 
    for (unsigned r = 0; r < pCopyBufferInfo->regionCount; r++) {
       const VkBufferCopy2 *region = &pCopyBufferInfo->pRegions[r];
@@ -397,6 +362,8 @@ radv_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCop
 
       radv_copy_memory(cmd_buffer, src_va, dst_va, region->size, src_copy_flags, dst_copy_flags);
    }
+
+   radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
 }
@@ -450,17 +417,17 @@ radv_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDevice
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, dstBuffer);
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, dstOffset);
-   struct radv_cmd_stream *cs = cmd_buffer->cs;
 
    const enum radv_copy_flags dst_copy_flags = radv_get_copy_flags_from_bo(dst_buffer->bo);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
-   radv_cs_add_buffer(device->ws, cs->b, dst_buffer->bo);
+   radv_meta_begin(cmd_buffer);
 
    radv_update_memory(cmd_buffer, dst_va, dataSize, pData, dst_copy_flags);
+
+   radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
 }

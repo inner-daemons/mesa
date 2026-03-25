@@ -64,7 +64,6 @@ static const struct debug_control radv_debug_options[] = {
    {"shadowregs", RADV_DEBUG_SHADOW_REGS},
    {"extra_md", RADV_DEBUG_EXTRA_MD},
    {"nogpl", RADV_DEBUG_NO_GPL},
-   {"videoarraypath", RADV_DEBUG_VIDEO_ARRAY_PATH},
    {"nort", RADV_DEBUG_NO_RT},
    {"nomeshshader", RADV_DEBUG_NO_MESH_SHADER},
    {"noeso", RADV_DEBUG_NO_ESO},
@@ -87,9 +86,9 @@ static const struct debug_control radv_debug_options[] = {
    {"novideo", RADV_DEBUG_NO_VIDEO},
    {"validatevas", RADV_DEBUG_VALIDATE_VAS},
    {"bo_history", RADV_DEBUG_DUMP_BO_HISTORY},
-   {"nobolist", RADV_DEBUG_NO_BO_LIST},
    {"dumpibs", RADV_DEBUG_DUMP_IBS},
    {"vm", RADV_DEBUG_VM},
+   {"nosmemmitigation", RADV_DEBUG_NO_SMEM_MITIGATION},
    {NULL, 0},
 };
 
@@ -119,11 +118,12 @@ static const struct debug_control radv_perftest_options[] = {
    {"dmashaders", RADV_PERFTEST_DMA_SHADERS},
    {"transfer_queue", RADV_PERFTEST_TRANSFER_QUEUE},
    {"nircache", RADV_PERFTEST_NIR_CACHE},
-   {"rtwave32", RADV_PERFTEST_RT_WAVE_32},
    {"video_encode", RADV_PERFTEST_VIDEO_ENCODE},
    {"nogttspill", RADV_PERFTEST_NO_GTT_SPILL},
    {"hic", RADV_PERFTEST_HIC},
    {"sparse", RADV_PERFTEST_SPARSE},
+   {"rtcps", RADV_PERFTEST_RT_CPS},
+   {"bfloat16", RADV_PERFTEST_BFLOAT16},
    {NULL, 0},
 };
 
@@ -169,6 +169,7 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_CLEAR_LDS(false)
       DRI_CONF_RADV_DISABLE_NGG_GS(false)
       DRI_CONF_RADV_GFX12_HIZ_WA()
+      DRI_CONF_RADV_PREFER_2D_SWIZZLE_FOR_3D_STORAGE(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
@@ -190,7 +191,6 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(false)
       DRI_CONF_RADV_DISABLE_TRUNC_COORD(false)
       DRI_CONF_RADV_DISABLE_SINKING_LOAD_INPUT_FS(false)
-      DRI_CONF_RADV_DISABLE_DEPTH_STORAGE(false)
       DRI_CONF_RADV_FLUSH_BEFORE_QUERY_COPY(false)
       DRI_CONF_RADV_ENABLE_UNIFIED_HEAP_ON_APU(false)
       DRI_CONF_RADV_TEX_NON_UNIFORM(false)
@@ -220,7 +220,6 @@ radv_init_dri_debug_options(struct radv_instance *instance)
    drirc->debug.disable_dcc = driQueryOptionb(&drirc->options, "radv_disable_dcc");
    drirc->debug.disable_dcc_mips = driQueryOptionb(&drirc->options, "radv_disable_dcc_mips");
    drirc->debug.disable_dcc_stores = driQueryOptionb(&drirc->options, "radv_disable_dcc_stores");
-   drirc->debug.disable_depth_storage = driQueryOptionb(&drirc->options, "radv_disable_depth_storage");
    drirc->debug.disable_shrink_image_store = driQueryOptionb(&drirc->options, "radv_disable_shrink_image_store");
    drirc->debug.disable_sinking_load_input_fs = driQueryOptionb(&drirc->options, "radv_disable_sinking_load_input_fs");
    drirc->debug.disable_tc_compat_htile_in_general =
@@ -266,6 +265,8 @@ radv_init_dri_performance_options(struct radv_instance *instance)
    drirc->performance.report_llvm9_version_string =
       driQueryOptionb(&drirc->options, "radv_report_llvm9_version_string");
    drirc->performance.gfx12_hiz_wa = driQueryOptionstr(&drirc->options, "radv_gfx12_hiz_wa");
+   drirc->performance.prefer_2d_swizzle_for_3d_storage =
+      driQueryOptionb(&drirc->options, "radv_prefer_2d_swizzle_for_3d_storage");
 }
 
 static void

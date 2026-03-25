@@ -49,7 +49,7 @@ nir_builder MUST_CHECK PRINTFLIKE(3, 4)
 
    nir_function *func = nir_function_create(b.shader, "main");
    func->is_entrypoint = true;
-   b.exact = false;
+   b.fp_math_ctrl = nir_fp_fast_math;
    b.impl = nir_function_impl_create(func);
    b.cursor = nir_after_cf_list(&b.impl->body);
 
@@ -71,8 +71,7 @@ nir_builder_alu_instr_finish_and_insert(nir_builder *build, nir_alu_instr *instr
 {
    const nir_op_info *op_info = &nir_op_infos[instr->op];
 
-   instr->exact = build->exact;
-   instr->fp_fast_math = build->fp_fast_math;
+   instr->fp_math_ctrl = nir_op_valid_fp_math_ctrl(instr->op, build->fp_math_ctrl);
 
    /* Guess the number of components the destination temporary should have
     * based on our input sizes, if it's not fixed for the op.
@@ -275,6 +274,15 @@ nir_build_tex_struct(nir_builder *build, nir_texop op, struct nir_tex_builder f)
          glsl_get_sampler_result_type(type));
    }
 
+   /* Fix up the opcode to allow simplified usage. This helps ergonomics. */
+   if (op == nir_texop_txf && f.ms_index) {
+      op = nir_texop_txf_ms;
+   } else if (op == nir_texop_tex && f.lod) {
+      op = nir_texop_txl;
+   } else if (op == nir_texop_tex && f.bias) {
+      op = nir_texop_txb;
+   }
+
    if (lod == NULL && nir_dim_has_lod(dim) &&
        (op == nir_texop_txs || op == nir_texop_txf)) {
 
@@ -289,6 +297,7 @@ nir_build_tex_struct(nir_builder *build, nir_texop op, struct nir_tex_builder f)
    tex->sampler_dim = dim;
    tex->is_array = is_array;
    tex->is_shadow = false;
+   tex->is_sparse = f.is_sparse;
    tex->backend_flags = f.backend_flags;
    tex->texture_index = f.texture_index;
    tex->sampler_index = f.sampler_index;
@@ -387,8 +396,7 @@ nir_vec_scalars(nir_builder *build, nir_scalar *comp, unsigned num_components)
       instr->src[i].src = nir_src_for_ssa(comp[i].def);
       instr->src[i].swizzle[0] = comp[i].comp;
    }
-   instr->exact = build->exact;
-   instr->fp_fast_math = build->fp_fast_math;
+   assert(nir_op_infos[op].valid_fp_math_ctrl == 0);
 
    /* Note: not reusing nir_builder_alu_instr_finish_and_insert() because it
     * can't re-guess the num_components when num_components == 1 (nir_op_mov).
@@ -401,13 +409,43 @@ nir_vec_scalars(nir_builder *build, nir_scalar *comp, unsigned num_components)
    return &instr->def;
 }
 
+nir_def *
+nir_def_rewrite_uses_with_alu_src(nir_builder *build, nir_def *def,
+                                  nir_alu_src src, unsigned num_components)
+{
+   if (nir_alu_src_is_trivial_ssa(&src, num_components)) {
+      nir_def_rewrite_uses(def, src.src.ssa);
+      return NULL;
+   }
+
+   nir_def *mov = NULL;
+
+   nir_foreach_use_including_if_safe(use, def) {
+      if (nir_src_is_if(use) || nir_src_parent_instr(use)->type != nir_instr_type_alu) {
+         if (!mov)
+            mov = nir_mov_alu(build, src, num_components);
+
+         nir_src_rewrite(use, mov);
+      } else {
+         nir_alu_src *alu_src = container_of(use, nir_alu_src, src);
+
+         for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++)
+            alu_src->swizzle[i] = src.swizzle[alu_src->swizzle[i]];
+
+         nir_src_rewrite(use, src.src.ssa);
+      }
+   }
+
+   return mov;
+}
+
 /**
  * Get nir_def for an alu src, respecting the nir_alu_src's swizzle.
  */
 nir_def *
 nir_ssa_for_alu_src(nir_builder *build, nir_alu_instr *instr, unsigned srcn)
 {
-   if (nir_alu_src_is_trivial_ssa(instr, srcn))
+   if (nir_alu_has_trivial_src(instr, srcn))
       return instr->src[srcn].src.ssa;
 
    nir_alu_src *src = &instr->src[srcn];
@@ -561,8 +599,7 @@ nir_push_continue(nir_builder *build, nir_loop *loop)
       loop = nir_cf_node_as_loop(block->cf_node.parent);
    }
 
-   nir_loop_add_continue_construct(loop);
-
+   assert(nir_loop_has_continue_construct(loop));
    build->cursor = nir_before_cf_list(&loop->continue_list);
    return loop;
 }

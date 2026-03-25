@@ -5,6 +5,7 @@
  */
 #include "ac_descriptors.h"
 #include "ac_shader_util.h"
+#include "aco_nir_call_attribs.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "radv_descriptor_set.h"
@@ -38,17 +39,61 @@ get_scalar_arg(nir_builder *b, unsigned size, struct ac_arg arg)
 }
 
 static nir_def *
+get_indirect_descriptors_addr(nir_builder *b, apply_layout_state *state)
+{
+   if (mesa_shader_stage_is_rt(b->shader->info.stage))
+      return nir_load_param(b, RT_ARG_DESCRIPTORS);
+   return get_scalar_arg(b, 1, state->args->descriptors[0]);
+}
+
+static nir_def *
+get_indirect_push_constants_addr(nir_builder *b, apply_layout_state *state)
+{
+   if (mesa_shader_stage_is_rt(b->shader->info.stage))
+      return nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
+   return get_scalar_arg(b, 1, state->args->ac.push_constants);
+}
+
+static nir_def *
+get_dynamic_descriptors_addr(nir_builder *b, apply_layout_state *state)
+{
+   if (mesa_shader_stage_is_rt(b->shader->info.stage))
+      return nir_load_param(b, RT_ARG_DYNAMIC_DESCRIPTORS);
+   return get_scalar_arg(b, 1, state->args->ac.dynamic_descriptors);
+}
+
+static nir_def *
 convert_pointer_to_64_bit(nir_builder *b, apply_layout_state *state, nir_def *ptr)
 {
    return nir_pack_64_2x32_split(b, ptr, nir_imm_int(b, state->address32_hi));
 }
 
 static nir_def *
+get_dynamic_descriptors_offset(nir_builder *b, apply_layout_state *state, uint32_t desc_set, uint32_t binding)
+{
+   struct radv_descriptor_set_layout *layout = state->layout->set[desc_set].layout;
+   nir_def *dynamic_offset_start;
+
+   if (state->layout->independent_sets) {
+      nir_def *addr = get_scalar_arg(b, 1, state->args->ac.dynamic_descriptors_offset_addr);
+      addr = convert_pointer_to_64_bit(b, state, addr);
+      dynamic_offset_start = ac_nir_load_smem(b, 1, addr, nir_imm_int(b, desc_set * 4), 4, 0);
+   } else {
+      dynamic_offset_start = nir_imm_int(b, state->layout->set[desc_set].dynamic_offset_start);
+   }
+
+   nir_def *offset = nir_iadd_imm(b, dynamic_offset_start, layout->binding[binding].dynamic_offset_offset);
+
+   return nir_imul_imm(b, offset, 16);
+}
+
+static nir_def *
 load_desc_ptr(nir_builder *b, apply_layout_state *state, unsigned set)
 {
    const struct radv_userdata_locations *user_sgprs_locs = &state->info->user_sgprs_locs;
-   if (user_sgprs_locs->shader_data[AC_UD_INDIRECT_DESCRIPTORS].sgpr_idx != -1) {
-      nir_def *addr = get_scalar_arg(b, 1, state->args->descriptors[0]);
+   if (user_sgprs_locs->shader_data[AC_UD_INDIRECT_DESCRIPTORS].sgpr_idx != -1 ||
+       mesa_shader_stage_is_rt(b->shader->info.stage)) {
+      nir_def *addr = get_indirect_descriptors_addr(b, state);
       addr = convert_pointer_to_64_bit(b, state, addr);
       return ac_nir_load_smem(b, 1, addr, nir_imm_int(b, set * 4), 4, 0);
    }
@@ -63,22 +108,21 @@ visit_vulkan_resource_index(nir_builder *b, apply_layout_state *state, nir_intri
    unsigned desc_set = nir_intrinsic_desc_set(intrin);
    unsigned binding = nir_intrinsic_binding(intrin);
    struct radv_descriptor_set_layout *layout = state->layout->set[desc_set].layout;
-   unsigned offset = layout->binding[binding].offset;
    unsigned stride;
 
-   nir_def *set_ptr;
+   nir_def *set_ptr, *offset;
    if (vk_descriptor_type_is_dynamic(layout->binding[binding].type)) {
-      unsigned idx = state->layout->set[desc_set].dynamic_offset_start + layout->binding[binding].dynamic_offset_offset;
-      set_ptr = get_scalar_arg(b, 1, state->args->ac.dynamic_descriptors);
-      offset = idx * 16;
+      set_ptr = get_dynamic_descriptors_addr(b, state);
+      offset = get_dynamic_descriptors_offset(b, state, desc_set, binding);
       stride = 16;
    } else {
       set_ptr = load_desc_ptr(b, state, desc_set);
+      offset = nir_imm_int(b, layout->binding[binding].offset);
       stride = layout->binding[binding].size;
    }
 
    nir_def *binding_ptr = nir_imul_imm_nuw(b, intrin->src[0].ssa, stride);
-   binding_ptr = nir_iadd_imm_nuw(b, binding_ptr, offset);
+   binding_ptr = nir_iadd_nuw(b, binding_ptr, offset);
 
    if (layout->binding[binding].type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
       assert(stride == 16);
@@ -341,8 +385,10 @@ load_push_constant(nir_builder *b, apply_layout_state *state, nir_intrinsic_inst
          continue;
       }
 
-      if (!state->args->ac.push_constants.used) {
-         /* Assume this is an inlined push constant load which was expanded to include dwords which are not inlined. */
+      if (!state->args->ac.push_constants.used && !mesa_shader_stage_is_rt(b->shader->info.stage)) {
+         /* Assume this is an inlined push constant load which was expanded to include dwords which are not inlined.
+          * RT stages use neither shader args nor inlined push constants, so skip this for RT shaders.
+          */
          assert(const_offset != -1);
          data[num_loads++] = nir_undef(b, 1, 32);
          start += 1;
@@ -350,7 +396,7 @@ load_push_constant(nir_builder *b, apply_layout_state *state, nir_intrinsic_inst
       }
 
       if (!offset) {
-         addr = get_scalar_arg(b, 1, state->args->ac.push_constants);
+         addr = get_indirect_push_constants_addr(b, state);
          addr = convert_pointer_to_64_bit(b, state, addr);
          offset = nir_iadd_imm_nuw(b, intrin->src[0].ssa, base);
       }
@@ -469,8 +515,7 @@ apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *te
       sampler = get_sampler_desc(b, state, sampler_deref_instr, AC_DESC_SAMPLER, tex->sampler_non_uniform, tex, false);
    }
 
-   if (sampler && state->disable_aniso_single_level && tex->sampler_dim < GLSL_SAMPLER_DIM_RECT &&
-       state->gfx_level < GFX8) {
+   if (sampler && state->disable_aniso_single_level && tex->sampler_dim < GLSL_SAMPLER_DIM_RECT) {
       /* Disable anisotropic filtering if BASE_LEVEL == LAST_LEVEL.
        *
        * GFX6-GFX7:
@@ -523,16 +568,16 @@ radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *device, c
 {
    bool progress = false;
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    apply_layout_state state = {
       .gfx_level = pdev->info.gfx_level,
       .address32_hi = pdev->info.address32_hi,
       .combined_image_sampler_desc_size = radv_get_combined_image_sampler_desc_size(pdev),
       .combined_image_sampler_offset = radv_get_combined_image_sampler_offset(pdev),
-      .disable_aniso_single_level = instance->drirc.debug.disable_aniso_single_level,
-      .has_image_load_dcc_bug = pdev->info.has_image_load_dcc_bug,
-      .disable_tg4_trunc_coord = !pdev->info.conformant_trunc_coord && !instance->drirc.debug.disable_trunc_coord,
+      .disable_aniso_single_level = pdev->cache_key.disable_aniso_single_level,
+      .has_image_load_dcc_bug = pdev->info.compiler_info.has_image_load_dcc_bug,
+      .disable_tg4_trunc_coord =
+         !pdev->info.compiler_info.conformant_trunc_coord && !pdev->cache_key.disable_trunc_coord,
       .args = &stage->args,
       .info = &stage->info,
       .layout = &stage->layout,

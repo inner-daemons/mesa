@@ -288,6 +288,7 @@ vk_common_GetPhysicalDeviceCalibrateableTimeDomainsKHR(
    VkPhysicalDevice physicalDevice, uint32_t *pTimeDomainCount,
    VkTimeDomainKHR *pTimeDomains)
 {
+   VK_FROM_HANDLE(vk_physical_device, pdevice, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkTimeDomainKHR, out, pTimeDomains, pTimeDomainCount);
 
    vk_outarray_append_typed(VkTimeDomainKHR, &out, p)
@@ -296,6 +297,7 @@ vk_common_GetPhysicalDeviceCalibrateableTimeDomainsKHR(
    const VkTimeDomainKHR host_time_domains[] = {
       VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
       VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
+      VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR,
    };
    for (uint32_t i = 0; i < ARRAY_SIZE(host_time_domains); i++) {
       const VkTimeDomainKHR domain = host_time_domains[i];
@@ -305,6 +307,10 @@ vk_common_GetPhysicalDeviceCalibrateableTimeDomainsKHR(
             *p = domain;
       }
    }
+
+   if (pdevice->supported_extensions.EXT_present_timing)
+      vk_outarray_append_typed(VkTimeDomainKHR, &out, p)
+         *p = VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT;
 
    return vk_outarray_status(&out);
 }

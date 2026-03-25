@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #pragma once
@@ -35,6 +17,7 @@ extern "C" {
 #define BRW_TEX_INSTR_FUSED_EU_DISABLE (1u << 30)
 
 extern const struct nir_shader_compiler_options brw_scalar_nir_options;
+struct brw_pass_tracker;
 
 void
 brw_fill_tess_info_from_shader_info(struct brw_tess_info *brw_info,
@@ -91,23 +74,6 @@ brw_nir_ubo_surface_index_is_pushable(nir_src src)
    }
 
    return nir_src_is_const(src);
-}
-
-static inline unsigned
-brw_nir_ubo_surface_index_get_push_block(nir_src src)
-{
-   if (nir_src_is_const(src))
-      return nir_src_as_uint(src);
-
-   if (!brw_nir_ubo_surface_index_is_pushable(src))
-      return UINT32_MAX;
-
-   assert(nir_src_is_intrinsic(src));
-
-   nir_intrinsic_instr *intrin = nir_def_as_intrinsic(src.ssa);
-   assert(intrin->intrinsic == nir_intrinsic_resource_intel);
-
-   return nir_intrinsic_resource_block_intel(intrin);
 }
 
 /* This helper return the binding table index of a surface access (any
@@ -179,6 +145,10 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
 bool brw_nir_lower_cs_intrinsics(nir_shader *nir,
                                  const struct intel_device_info *devinfo,
                                  struct brw_cs_prog_data *prog_data);
+bool brw_nir_lower_cs_subgroup_id(nir_shader *nir,
+                                  const struct intel_device_info *devinfo,
+                                  unsigned subgroup_id_offset);
+
 bool brw_nir_lower_alpha_to_coverage(nir_shader *shader);
 bool brw_needs_vertex_attributes_bypass(const nir_shader *shader);
 void brw_nir_lower_fs_barycentrics(nir_shader *shader);
@@ -232,6 +202,13 @@ struct brw_lower_urb_cb_data {
 bool brw_nir_lower_inputs_to_urb_intrinsics(nir_shader *, const struct brw_lower_urb_cb_data *);
 
 bool brw_nir_lower_outputs_to_urb_intrinsics(nir_shader *, const struct brw_lower_urb_cb_data *);
+bool brw_nir_lower_deferred_urb_writes(nir_shader *nir,
+                                       const struct intel_device_info *devinfo,
+                                       const struct intel_vue_map *vue_map,
+                                       unsigned extra_urb_slot_offset,
+                                       unsigned gs_vertex_stride);
+
+void brw_nir_opt_vectorize_urb(struct brw_pass_tracker *pt);
 
 void brw_nir_lower_vs_inputs(nir_shader *nir);
 void brw_nir_lower_gs_inputs(nir_shader *nir,
@@ -243,7 +220,7 @@ void brw_nir_lower_tes_inputs(nir_shader *nir,
                               const struct intel_vue_map *vue);
 void brw_nir_lower_fs_inputs(nir_shader *nir,
                              const struct intel_device_info *devinfo,
-                             const struct brw_wm_prog_key *key);
+                             const struct brw_fs_prog_key *key);
 void brw_nir_lower_vue_outputs(nir_shader *nir);
 void brw_nir_lower_tcs_inputs(nir_shader *nir,
                               const struct intel_device_info *devinfo,
@@ -254,7 +231,10 @@ void brw_nir_lower_tcs_outputs(nir_shader *nir,
                                enum tess_primitive_mode tes_primitive_mode);
 void brw_nir_lower_fs_outputs(nir_shader *nir);
 bool brw_nir_lower_fs_load_output(nir_shader *shader,
-                                  const struct brw_wm_prog_key *key);
+                                  const struct brw_fs_prog_key *key);
+
+bool brw_nir_lower_frag_coord_z(nir_shader *nir,
+                                const struct intel_device_info *devinfo);
 
 bool brw_nir_lower_cmat(nir_shader *nir, unsigned subgroup_size);
 
@@ -293,26 +273,19 @@ bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader,
 
 bool brw_nir_lower_simd(nir_shader *nir, unsigned dispatch_width);
 
-void brw_postprocess_nir_opts(nir_shader *nir,
-                              const struct brw_compiler *compiler,
+void brw_postprocess_nir_opts(struct brw_pass_tracker *pt,
                               enum brw_robustness_flags robust_flags);
 
-void brw_postprocess_nir_out_of_ssa(nir_shader *nir,
-                                    unsigned dispatch_width,
-                                    debug_archiver *archiver,
+void brw_postprocess_nir_out_of_ssa(struct brw_pass_tracker *pt,
                                     bool debug_enabled);
 
 static inline void
-brw_postprocess_nir(nir_shader *nir,
-                    const struct brw_compiler *compiler,
-                    unsigned dispatch_width,
-                    debug_archiver *archiver,
+brw_postprocess_nir(struct brw_pass_tracker *pt,
                     bool debug_enabled,
                     enum brw_robustness_flags robust_flags)
 {
-   brw_postprocess_nir_opts(nir, compiler, robust_flags);
-   brw_postprocess_nir_out_of_ssa(nir, dispatch_width, archiver,
-                                  debug_enabled);
+   brw_postprocess_nir_opts(pt, robust_flags);
+   brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
 }
 
 bool brw_nir_apply_attribute_workarounds(nir_shader *nir,
@@ -328,8 +301,7 @@ bool brw_nir_lower_fsign(nir_shader *nir);
 
 bool brw_nir_opt_fsat(nir_shader *);
 
-void brw_nir_apply_key(nir_shader *nir,
-                       const struct brw_compiler *compiler,
+void brw_nir_apply_key(struct brw_pass_tracker *pt,
                        const struct brw_base_prog_key *key,
                        unsigned max_subgroup_size);
 
@@ -350,16 +322,7 @@ bool brw_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
                                   nir_intrinsic_instr *high,
                                   void *data);
 
-void brw_nir_analyze_ubo_ranges(const struct brw_compiler *compiler,
-                                nir_shader *nir,
-                                struct brw_ubo_range out_ranges[4]);
-
-void brw_nir_optimize(nir_shader *nir,
-                      const struct intel_device_info *devinfo);
-
-nir_shader *brw_nir_create_passthrough_tcs(void *mem_ctx,
-                                           const struct brw_compiler *compiler,
-                                           const struct brw_tcs_prog_key *key);
+void brw_nir_optimize(struct brw_pass_tracker *pt);
 
 #define BRW_NIR_FRAG_OUTPUT_INDEX_SHIFT 0
 #define BRW_NIR_FRAG_OUTPUT_INDEX_MASK INTEL_MASK(0, 0)
@@ -380,8 +343,7 @@ const struct glsl_type *brw_nir_get_var_type(const struct nir_shader *nir,
                                              nir_variable *var);
 
 static inline nir_variable_mode
-brw_nir_no_indirect_mask(const struct brw_compiler *compiler,
-                         mesa_shader_stage stage)
+brw_nir_no_indirect_mask(mesa_shader_stage stage)
 {
    nir_variable_mode indirect_mask = (nir_variable_mode) 0;
 
@@ -451,6 +413,9 @@ bool
 brw_nir_frag_convert_attrs_prim_to_vert_indirect(struct nir_shader *nir,
                                                  const struct intel_device_info *devinfo,
                                                  struct brw_compile_fs_params *params);
+
+unsigned
+brw_nir_pack_vs_input(nir_shader *nir, struct brw_vs_prog_data *prog_data);
 
 #ifdef __cplusplus
 }

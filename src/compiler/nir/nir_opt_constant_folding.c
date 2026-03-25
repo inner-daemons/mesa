@@ -77,7 +77,7 @@ nir_try_constant_fold_alu(nir_builder *b, nir_alu_instr *alu)
    memset(dest, 0, sizeof(dest));
    for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; ++i)
       srcs[i] = src[i];
-   nir_eval_const_opcode(alu->op, dest, alu->def.num_components,
+   nir_eval_const_opcode(alu->op, dest, NULL, alu->def.num_components,
                          bit_size, srcs,
                          b->shader->info.float_controls_execution_mode);
 
@@ -314,6 +314,14 @@ try_fold_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
          return NULL;
 
       return nir_imm_bool(b, constant_true);
+   }
+
+   case nir_intrinsic_ballot_relaxed:
+   case nir_intrinsic_ballot: {
+      if (!nir_src_is_const(intrin->src[0]) || nir_src_as_bool(intrin->src[0]))
+         return NULL;
+
+      return nir_imm_zero(b, intrin->def.num_components, intrin->def.bit_size);
    }
 
    case nir_intrinsic_load_input:

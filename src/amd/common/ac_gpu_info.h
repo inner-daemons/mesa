@@ -19,6 +19,74 @@ extern "C" {
 #define AMD_MAX_SA_PER_SE  2
 #define AMD_MAX_WGP        60
 
+/* Memory is divided among memory channels such that each 256B maps to a different memory channel
+ * and the memory channel index increments with each 256B block, which wraps around to 0 after
+ * the last memory channel index.
+ *
+ * For example, with 16 memory channels, address bits 8:11 contain the memory channel index.
+ * Let's call them "channel address bits". The number of memory channels can be a non-power-of-two
+ * on some chips.
+ *
+ * AMD GPUs usually assign 16 bits of memory bus to 1 memory channel. For example, 192-bit GDDR
+ * memory bus has 12 memory channels. APUs usually have 1 memory channel per 32 bits or 64 bits
+ * of memory bus. The physical memory channels don't always map 1:1 to AMD GPU memory channels.
+ *
+ * Memory channels are like separate cores. The advertised bandwidth and cache sizes are always
+ * for all memory channels combined. That means that each channel has only 1/num_memory_channels
+ * bandwidth and 1/memory_channels cache size. If all memory accesses unluckily end up in the same
+ * channel for all running shaders, the available memory bandwidth is only 1/num_memory_channels
+ * and the available cache size is also only 1/num_memory_channels. With 16 memory channels, that
+ * would be 16x worse cache and memory performance.
+ *
+ * Strategies to distribute work among all memory channels evenly:
+ *
+ * - Ring element sizes should be set to an odd multiple of 256 to make sure each element starts on
+ *   a different memory channel. This is similar to how LDS banks work, but the granularity is 256B
+ *   instead of 4B here. The simplest way to do that is that if the ring element size is > 256,
+ *   apply "|= 256;" to it. The scratch ring and the task shader payload ring do this.
+ *
+ * - For tree data structures in memory, try to randomize channel address bits, which can be done by
+ *   making sure that tree nodes start on an odd multiple of 256. All possible numbers of
+ *   ((address / 256) % num_memory_channels) should be represented equally in the node addresses.
+ *
+ * - If we have a ring buffer where we can't set the ring element size (e.g. TCS outputs where it's
+ *   set to 32K), each workgroup should write at least (num_memory_channels * 256) of TCS outputs
+ *   in bytes, and ideally twice that amount, to make sure each workgroup doesn't leave some memory
+ *   channels (and thus bandwidth) completely unused or underutilized. We could also shift
+ *   the placement of TCS outputs to a random 256*i offset within each 32K segment instead. Our TCS
+ *   workgroup size calculation takes this into account.
+ *
+ * - radeon_surf::tile_swizzle is a random number that randomizes channel address bits to make sure
+ *   some fixed image coordinates (x,y) map to a different memory channel for each image, so if
+ *   a shader were to access multiple images at some fixed image coordinates (x,y) with the same
+ *   bpp, each image would load from a different channel if radeon_surf::tile_swizzle is different.
+ *   If multiple render targets are bound, it's recommended that they all have different tile_swizzle,
+ *   so that MRT0 goes to channel A, MRT1 goes to channel B (A != B), etc. Other than that, image
+ *   tiling does the optimal thing for us. The main purpose of 4K and bigger tiling is to distribute
+ *   work among all memory channels evenly. Linear and 256B tiling generally don't do that.
+ *
+ * - Performance is also affected by how many memory channels a VMEM instruction or a clause
+ *   intersects. Stores are more sensitive to this than loads because they are often globally
+ *   coherent. For example, a 32-lane VMEM store can store to address range=128..640 (size=512),
+ *   which stores data to 3 memory channels, while storing to address range=256..768 stores the same
+ *   amount of data to only 2 memory channels. The latter case has better performance (less VMEM
+ *   latency) when all memory channels are already busy because the wave only has to wait for replies
+ *   from 2 channels instead of 3, and 1 channel has less work to do. Examples are:
+ *   - Our clear_buffer and copy_buffer compute shaders where the store address of lane 0 is always
+ *     a multiple of 256, so that each subgroup always stores to a 256B-aligned memory region of
+ *     size 256*N.
+ *   - Our image clear and blit compute shaders where the stored adress range of each compute
+ *     subgroup is always aligned to 256B and stores 256*N. That's accomplished by making compute
+ *     subgroups always clear or copy whole 256B image tiles, whose dimensions differ between tiling
+ *     modes.
+ *   - Vertex 0 of each TCS output starts on an address aligned to 256 to make TCS output stores
+ *     from each subgroup always store 256B-aligned blocks of 256*N bytes.
+ *
+ * Number 256 comes from GB_ADDR_CONFIG.PIPE_INTERLEAVE_SIZE. It's always 256 on all GCN and RDNA
+ * chips. "Pipe" means a memory channel in this context.
+ */
+#define AMD_MEMCHANNEL_INTERLEAVE_BYTES 256 /* always equal to GB_ADDR_CONFIG.PIPE_INTERLEAVE_SIZE */
+
 struct amdgpu_gpu_info;
 struct drm_amdgpu_info_device;
 
@@ -32,7 +100,8 @@ struct amd_ip_info {
    uint32_t ib_pad_dw_mask;
 };
 
-struct ac_cu_info {
+struct ac_compiler_info {
+   enum amd_gfx_level gfx_level;
    uint32_t max_waves_per_simd;
    uint32_t num_physical_sgprs_per_simd;
    uint32_t num_physical_wave64_vgprs_per_simd;
@@ -44,32 +113,89 @@ struct ac_cu_info {
    uint32_t max_vgpr_alloc;
    uint32_t wave64_vgpr_alloc_granularity;
 
+   uint32_t hs_offchip_workgroup_dw_size;
+
    /* Flags */
-   bool has_lds_bank_count_16 : 1;
-   bool has_sram_ecc_enabled : 1;
+   uint32_t has_lds_bank_count_16 : 1;
+   uint32_t has_sram_ecc_enabled : 1;
    /* Whether image_sample* instructions can be either a sampler or no-sampler access.*/
-   bool has_point_sample_accel : 1;
-   bool has_fast_fma32 : 1;
+   uint32_t has_point_sample_accel : 1;
+   uint32_t has_fast_fma32 : 1;
    /* Whether chips support fused v_fma_mix* instructions.
     * Otherwise, unfused v_mad_mix* is available on GFX9.
     */
-   bool has_fma_mix : 1;
+   uint32_t has_fma_mix : 1;
    /* Whether chips support unfused multiply-add instructions. */
-   bool has_mad32 : 1;
+   uint32_t has_mad32 : 1;
    /* Whether chips support double rate packed math instructions. */
-   bool has_packed_math_16bit : 1;
+   uint32_t has_packed_math_16bit : 1;
    /* Whether chips support dot product instructions. A subset of these support a smaller
     * instruction encoding which accumulates with the destination.
     */
-   bool has_accelerated_dot_product : 1;
+   uint32_t has_accelerated_dot_product : 1;
    /* Device supports hardware-accelerated raytracing using
     * image_bvh*_intersect_ray instructions
     */
-   bool has_image_bvh_intersect_ray : 1;
+   uint32_t has_image_bvh_intersect_ray : 1;
+   /* Whether PRIMGEN_PASSTHRU_NO_MSG is supported. */
+   uint32_t has_ngg_passthru_no_msg : 1;
+   /* Whether local invocation IDs are packed in a single VGPR. */
+   uint32_t local_invocation_ids_packed : 1;
+   /* Whether the chip supports FMASK. */
+   uint32_t has_fmask : 1;
+   /* Whether 3D textures, cubemap textures, border colors, and mipmapping are supported. (CDNA) */
+   uint32_t has_3d_cube_border_color_mipmap : 1;
+
+   /* conformant_trunc_coord is equal to TA_CNTL2.TRUNCATE_COORD_MODE, which exists since gfx11.
+    *
+    * If TA_CNTL2.TRUNCATE_COORD_MODE == 0, coordinate truncation is the same as gfx10 and older.
+    *
+    * If TA_CNTL2.TRUNCATE_COORD_MODE == 1, coordinate truncation is adjusted to be D3D9/GL/Vulkan
+    * conformant if you also set TRUNC_COORD. Coordinate truncation uses D3D10+ behaviour if
+    * TRUNC_COORD is unset.
+    *
+    * Behavior if TA_CNTL2.TRUNCATE_COORD_MODE == 1:
+    *    truncate_coord_xy = TRUNC_COORD && (xy_filter == Point && !gather);
+    *    truncate_coord_z = TRUNC_COORD && (z_filter == Point);
+    *    truncate_coord_layer = false;
+    *
+    * Behavior if TA_CNTL2.TRUNCATE_COORD_MODE == 0:
+    *    truncate_coord_xy = TRUNC_COORD;
+    *    truncate_coord_z = TRUNC_COORD;
+    *    truncate_coord_layer = TRUNC_COORD;
+    *
+    * AnisoPoint is treated as Point.
+    */
+   uint32_t conformant_trunc_coord : 1;
+
+   uint32_t has_attr_ring : 1;
+   uint32_t mesh_fast_launch_2 : 1;
+
+   /* GFX6-7: limit TCS workgroup to 16 patches for better performance. */
+   uint32_t smaller_tcs_workgroups : 1;
+
    /* Some GFX6 GPUs have a bug where it only looks at the x writemask component. */
-   bool has_gfx6_mrt_export_bug : 1;
+   uint32_t has_gfx6_mrt_export_bug : 1;
    /* Pre-GFX9: A bug where the alpha component of 10_10_10_2 formats is always unsigned.*/
-   bool has_vtx_format_alpha_adjust_bug : 1;
+   uint32_t has_vtx_format_alpha_adjust_bug : 1;
+   /* GFX6-7: SMEM accesses memory even when it's out of bounds */
+   uint32_t has_smem_oob_access_bug : 1;
+   /* GFX10.3: WRITE_COMPRESS_ENABLE must be 0 for all image loads. */
+   uint32_t has_image_load_dcc_bug : 1;
+   /* GFX9: If there are no HS threads, SPI mistakenly loads the LS VGPRs starting at VGPR 0. */
+   uint32_t has_ls_vgpr_init_bug : 1;
+   /* GFX6-7: FS exports are not clamped correctly in certain situations. */
+   uint32_t has_cb_lt16bit_int_clamp_bug : 1;
+   /* GFX10.3: whether frag_pos.z needs adjusting when VRS is used. */
+   uint32_t has_vrs_frag_pos_z_bug : 1;
+   /* GFX10: hang when NGG exports zero vertices and primitives. */
+   uint32_t has_ngg_fully_culled_bug : 1;
+   /* GFX11-11.5: require wait between attribute stores and the final export. */
+   uint32_t has_attr_ring_wait_bug : 1;
+   /* GFX6: limit TCS workgroup to one patch if primitive ID is used. */
+   uint32_t has_primid_instancing_bug : 1;
+
+   uint32_t reserved : 5;
 };
 
 struct radeon_info {
@@ -134,11 +260,9 @@ struct radeon_info {
    bool has_htile_tc_z_clear_bug_without_stencil;
    bool has_htile_tc_z_clear_bug_with_stencil;
    bool has_small_prim_filter_sample_loc_bug;
-   bool has_ls_vgpr_init_bug;
    bool has_pops_missed_overlap_bug;
-   bool has_cb_lt16bit_int_clamp_bug;
    bool has_zero_index_buffer_bug;
-   bool has_image_load_dcc_bug;
+   bool has_db_force_stencil_valid_bug;
    bool has_two_planes_iterate256_bug;
    bool has_vgt_flush_ngg_legacy_bug;
    bool has_prim_restart_sync_bug;
@@ -146,17 +270,13 @@ struct radeon_info {
    bool has_async_compute_threadgroup_bug;
    bool has_async_compute_align32_bug;
    bool has_32bit_predication;
-   bool has_3d_cube_border_color_mipmap;
    bool has_image_opcodes;
    bool never_stop_sq_perf_counters;
    bool has_sqtt_rb_harvest_bug;
    bool has_sqtt_auto_flush_mode_bug;
    bool never_send_perfcounter_stop;
    bool discardable_allows_big_page;
-   bool has_ngg_fully_culled_bug;
-   bool has_ngg_passthru_no_msg;
    bool has_export_conflict_bug;
-   bool has_attr_ring_wait_bug;
    bool cp_dma_supports_sparse;
    bool has_vrs_ds_export_bug;
    bool has_taskmesh_indirect0_bug;
@@ -171,27 +291,6 @@ struct radeon_info {
                              * the LLVM version doesn't work with multiparts shaders.
                              */
 
-   /* conformant_trunc_coord is equal to TA_CNTL2.TRUNCATE_COORD_MODE, which exists since gfx11.
-    *
-    * If TA_CNTL2.TRUNCATE_COORD_MODE == 0, coordinate truncation is the same as gfx10 and older.
-    *
-    * If TA_CNTL2.TRUNCATE_COORD_MODE == 1, coordinate truncation is adjusted to be D3D9/GL/Vulkan
-    * conformant if you also set TRUNC_COORD. Coordinate truncation uses D3D10+ behaviour if
-    * TRUNC_COORD is unset.
-    *
-    * Behavior if TA_CNTL2.TRUNCATE_COORD_MODE == 1:
-    *    truncate_coord_xy = TRUNC_COORD && (xy_filter == Point && !gather);
-    *    truncate_coord_z = TRUNC_COORD && (z_filter == Point);
-    *    truncate_coord_layer = false;
-    *
-    * Behavior if TA_CNTL2.TRUNCATE_COORD_MODE == 0:
-    *    truncate_coord_xy = TRUNC_COORD;
-    *    truncate_coord_z = TRUNC_COORD;
-    *    truncate_coord_layer = TRUNC_COORD;
-    *
-    * AnisoPoint is treated as Point.
-    */
-   bool conformant_trunc_coord;
    /* Support GS_FAST_LAUNCH(2) for mesh shaders. */
    bool mesh_fast_launch_2;
 
@@ -311,8 +410,9 @@ struct radeon_info {
     */
    bool uses_kernel_cu_mask;
 
+   struct ac_compiler_info compiler_info;
+
    /* Shader cores. */
-   struct ac_cu_info cu_info;
    uint16_t cu_mask[AMD_MAX_SE][AMD_MAX_SA_PER_SE];
    uint32_t r600_max_quad_pipes; /* wave size / 16 */
    uint32_t max_good_cu_per_sa;
@@ -332,7 +432,6 @@ struct radeon_info {
    uint32_t pos_ring_offset;              /* GFX12+ */
    uint32_t prim_ring_offset;             /* GFX12+ */
    uint32_t total_attribute_pos_prim_ring_size; /* GFX11+ */
-   bool has_attr_ring;
 
    /* Tessellation rings. */
    uint32_t hs_offchip_param;
@@ -347,12 +446,12 @@ struct radeon_info {
    uint32_t r600_gb_backend_map; /* R600 harvest config */
    bool r600_gb_backend_map_valid;
    uint32_t r600_num_banks;
+   uint32_t r600_pipe_interleave_bytes;
    uint32_t mc_arb_ramcfg;
    uint32_t gb_addr_config;
    uint32_t pa_sc_tile_steering_override; /* CLEAR_STATE also sets this */
    uint32_t max_render_backends;  /* number of render backends incl. disabled ones */
    uint32_t num_tile_pipes; /* pipe count from PIPE_CONFIG */
-   uint32_t pipe_interleave_bytes;
    uint64_t enabled_rb_mask; /* bitmask of enabled physical RBs, up to max_render_backends bits */
    uint64_t max_alignment;   /* from addrlib */
    uint32_t pbb_max_alloc_count;
@@ -364,6 +463,11 @@ struct radeon_info {
    /* AMD_CU_MASK environment variable or ~0. */
    bool spi_cu_en_has_effect;
    uint32_t spi_cu_en;
+
+   /* Raster config. */
+   uint32_t pa_sc_raster_config;
+   uint32_t pa_sc_raster_config_1;
+   uint32_t se_tile_repeat;
 
    struct {
       uint32_t shadow_size;
@@ -385,7 +489,7 @@ enum ac_query_gpu_info_result {
 
 enum ac_query_gpu_info_result ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                                                 bool require_pci_bus_info);
-void ac_fill_cu_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_info);
+void ac_fill_compiler_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_info);
 
 void ac_compute_driver_uuid(char *uuid, size_t size);
 

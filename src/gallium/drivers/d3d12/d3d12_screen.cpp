@@ -46,7 +46,7 @@
 #include "util/u_memory.h"
 #include "util/u_screen.h"
 #include "util/u_dl.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 #include "frontend/sw_winsys.h"
 
@@ -437,6 +437,7 @@ d3d12_init_screen_caps(struct d3d12_screen *screen)
    caps->max_texture_anisotropy = D3D12_MAX_MAXANISOTROPY;
 
    caps->max_texture_lod_bias = 15.99f;
+   caps->packed_uniforms = true;
 }
 
 static bool
@@ -650,6 +651,10 @@ d3d12_deinit_screen(struct d3d12_screen *screen)
    if (screen->dev10) {
       screen->dev10->Release();
       screen->dev10 = nullptr;
+   }
+   if (screen->dev15) {
+      screen->dev15->Release();
+      screen->dev15 = nullptr;
    }
    if (screen->dev) {
       screen->dev->Release();
@@ -1161,8 +1166,14 @@ d3d12_interop_query_device_info(struct pipe_screen *pscreen, uint32_t data_size,
    if (data_size >= sizeof(d3d12_interop_device_info1)) {
       d3d12_interop_device_info1 *info1 = (d3d12_interop_device_info1 *)data;
       info1->set_context_queue_priority_manager = d3d12_context_set_queue_priority_manager;
+#ifdef HAVE_GALLIUM_D3D12_VIDEO
       info1->set_video_encoder_max_async_queue_depth = d3d12_video_encoder_set_max_async_queue_depth;
       info1->get_video_enc_last_slice_completion_fence = d3d12_video_encoder_get_last_slice_completion_fence;
+#else
+      info1->set_video_encoder_max_async_queue_depth = NULL;
+      info1->get_video_enc_last_slice_completion_fence = NULL;
+#endif // HAVE_GALLIUM_D3D12_VIDEO
+
       return sizeof(*info1);
    }
 
@@ -1629,6 +1640,9 @@ d3d12_init_screen(struct d3d12_screen *screen, IUnknown *adapter)
    if (FAILED(screen->dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&screen->fence))))
       return false;
 
+   screen->dev->QueryInterface(&screen->dev15);
+
+   // Uses screen->dev15 so QI must be before this
    if (!d3d12_init_residency(screen))
       return false;
 
@@ -1720,26 +1734,26 @@ d3d12_init_screen(struct d3d12_screen *screen, IUnknown *adapter)
 #endif
 
    const char *mesa_version = "Mesa " PACKAGE_VERSION MESA_GIT_SHA1;
-   struct mesa_sha1 sha1_ctx;
-   uint8_t sha1[SHA1_DIGEST_LENGTH];
-   STATIC_ASSERT(PIPE_UUID_SIZE <= sizeof(sha1));
+   blake3_hasher blake3_ctx;
+   uint8_t blake3[BLAKE3_KEY_LEN];
+   STATIC_ASSERT(PIPE_UUID_SIZE <= sizeof(blake3));
 
    /* The driver UUID is used for determining sharability of images and memory
     * between two instances in separate processes.  People who want to
     * share memory need to also check the device UUID or LUID so all this
     * needs to be is the build-id.
     */
-   _mesa_sha1_compute(mesa_version, strlen(mesa_version), sha1);
-   memcpy(screen->driver_uuid, sha1, PIPE_UUID_SIZE);
+   _mesa_blake3_compute(mesa_version, strlen(mesa_version), blake3);
+   memcpy(screen->driver_uuid, blake3, PIPE_UUID_SIZE);
 
    /* The device UUID uniquely identifies the given device within the machine. */
-   _mesa_sha1_init(&sha1_ctx);
-   _mesa_sha1_update(&sha1_ctx, &screen->vendor_id, sizeof(screen->vendor_id));
-   _mesa_sha1_update(&sha1_ctx, &screen->device_id, sizeof(screen->device_id));
-   _mesa_sha1_update(&sha1_ctx, &screen->subsys_id, sizeof(screen->subsys_id));
-   _mesa_sha1_update(&sha1_ctx, &screen->revision, sizeof(screen->revision));
-   _mesa_sha1_final(&sha1_ctx, sha1);
-   memcpy(screen->device_uuid, sha1, PIPE_UUID_SIZE);
+   _mesa_blake3_init(&blake3_ctx);
+   _mesa_blake3_update(&blake3_ctx, &screen->vendor_id, sizeof(screen->vendor_id));
+   _mesa_blake3_update(&blake3_ctx, &screen->device_id, sizeof(screen->device_id));
+   _mesa_blake3_update(&blake3_ctx, &screen->subsys_id, sizeof(screen->subsys_id));
+   _mesa_blake3_update(&blake3_ctx, &screen->revision, sizeof(screen->revision));
+   _mesa_blake3_final(&blake3_ctx, blake3);
+   memcpy(screen->device_uuid, blake3, PIPE_UUID_SIZE);
 
    d3d12_init_shader_caps(screen);
    d3d12_init_compute_caps(screen);

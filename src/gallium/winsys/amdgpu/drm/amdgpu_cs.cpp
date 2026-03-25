@@ -1416,6 +1416,15 @@ struct cond_exec_skip_count {
    uint64_t start_wptr;
 };
 
+#define add_dbg_count_write_data_pkt(number) do { \
+   amdgpu_pkt_add_dw(PKT3(PKT3_WRITE_DATA, 4, 0)); \
+   amdgpu_pkt_add_dw(WRITE_DATA_DST_SEL(5) | WRITE_DATA_WR_CONFIRM | WRITE_DATA_CACHE_POLICY(3)); \
+   amdgpu_pkt_add_dw(userq->write_data_pkt_dbg_count_va); \
+   amdgpu_pkt_add_dw(userq->write_data_pkt_dbg_count_va >> 32); \
+   amdgpu_pkt_add_dw(number); \
+   amdgpu_pkt_add_dw((uint64_t)number >> 32); \
+} while (0)
+
 static void amdgpu_cs_add_userq_packets(struct amdgpu_winsys *aws,
                                         struct amdgpu_userq *userq,
                                         struct amdgpu_cs_context *csc,
@@ -1440,6 +1449,9 @@ static void amdgpu_cs_add_userq_packets(struct amdgpu_winsys *aws,
          cond_exec_skip_counts[0].count_dw_ptr = amdgpu_pkt_get_ptr_skip_dw();
          cond_exec_skip_counts[0].start_wptr = amdgpu_pkt_get_next_wptr();
       }
+
+      if (aws->userq_job_log)
+         add_dbg_count_write_data_pkt(1);
 
       if (num_fences) {
          unsigned max_num_fences_fwm;
@@ -1473,6 +1485,9 @@ static void amdgpu_cs_add_userq_packets(struct amdgpu_winsys *aws,
          }
       }
 
+      if (aws->userq_job_log)
+         add_dbg_count_write_data_pkt(2);
+
       amdgpu_pkt_add_dw(PKT3(PKT3_HDP_FLUSH, 0, 0));
       amdgpu_pkt_add_dw(0x0);
 
@@ -1480,17 +1495,17 @@ static void amdgpu_cs_add_userq_packets(struct amdgpu_winsys *aws,
          amdgpu_pkt_add_dw(PKT3(PKT3_INDIRECT_BUFFER, 2, 0));
          amdgpu_pkt_add_dw(amdgpu_bo_get_va(userq->f32_shadowing_ib_bo));
          amdgpu_pkt_add_dw(amdgpu_bo_get_va(userq->f32_shadowing_ib_bo) >> 32);
-         amdgpu_pkt_add_dw(userq->f32_shadowing_ib_pm4_dw | S_3F3_INHERIT_VMID_MQD_GFX(1));
+         amdgpu_pkt_add_dw(userq->f32_shadowing_ib_pm4_dw | S_3F_3_INHERIT_VMID_PFP(1));
       }
 
       amdgpu_pkt_add_dw(PKT3(PKT3_INDIRECT_BUFFER, 2, 0));
       amdgpu_pkt_add_dw(csc->chunk_ib[IB_MAIN].va_start);
       amdgpu_pkt_add_dw(csc->chunk_ib[IB_MAIN].va_start >> 32);
       if (userq->ip_type == AMD_IP_GFX)
-         amdgpu_pkt_add_dw((csc->chunk_ib[IB_MAIN].ib_bytes / 4) | S_3F3_INHERIT_VMID_MQD_GFX(1));
+         amdgpu_pkt_add_dw((csc->chunk_ib[IB_MAIN].ib_bytes / 4) | S_3F_3_INHERIT_VMID_PFP(1));
       else
-         amdgpu_pkt_add_dw((csc->chunk_ib[IB_MAIN].ib_bytes / 4) | S_3F3_VALID_COMPUTE(1) |
-                              S_3F3_INHERIT_VMID_MQD_COMPUTE(1));
+         amdgpu_pkt_add_dw((csc->chunk_ib[IB_MAIN].ib_bytes / 4) | S_3F_3_VALID(1) |
+                              S_3F_3_INHERIT_VMID_MEC(1));
 
       /* Add 8 for release mem packet and 2 for protected fence signal packet.
        * Calculcating userq_fence_seq_num this way to match with kernel fence that is
@@ -1534,7 +1549,7 @@ static void amdgpu_cs_add_userq_packets(struct amdgpu_winsys *aws,
          for (unsigned i = 0; i < 1 + DIV_ROUND_UP(num_fences, 4); i++)
             *cond_exec_skip_counts[i].count_dw_ptr = (amdgpu_pkt_get_next_wptr() -
                                                          cond_exec_skip_counts[i].start_wptr) |
-                                                         COND_EXEC_USERQ_OVERRULE_CMD;
+                                                         S_22_4_EXEC_USERQ_OVERRULE_CMD(1);
       }
    } else {
       mesa_loge("amdgpu: unsupported userq ip submission = %d\n", userq->ip_type);
@@ -1628,6 +1643,18 @@ static int amdgpu_cs_submit_ib_userq(struct amdgpu_userq *userq,
    if (r)
       mesa_loge("amdgpu: getting wait fences failed\n");
 
+   if (aws->userq_job_log) {
+      for (unsigned i = 0; i < userq_wait_data.num_fences; i++) {
+         /* The uq_va memory is allocated in kernel from a memory chunk. This memory chunk is
+          * mapped to same address for all process/apps. Once uq_va is guess mapped to a
+          * given queue, cross process/queue fence dependency can be analyzed.
+          */
+         mesa_logi("amdgpu: uq_log: %s:  num_wait_fences=%d  uq_va=%llx  job=%llx\n",
+                   amdgpu_userq_str[acs->queue_index], userq_wait_data.num_fences,
+                   (long long)fence_info[i].va, (long long)fence_info[i].value);
+      }
+   }
+
    simple_mtx_lock(&userq->lock);
    amdgpu_cs_add_userq_packets(aws, userq, csc, userq_wait_data.num_fences, fence_info);
    struct drm_amdgpu_userq_signal userq_signal_data = {
@@ -1657,6 +1684,11 @@ static int amdgpu_cs_submit_ib_userq(struct amdgpu_userq *userq,
 #endif
    userq->doorbell_bo_map[AMDGPU_USERQ_DOORBELL_INDEX] = userq->next_wptr;
    r = ac_drm_userq_signal(aws->dev, &userq_signal_data);
+
+   if (aws->userq_job_log) {
+      mesa_logi("amdgpu: uq_log: %s:  submitted_job=%llx\n", amdgpu_userq_str[acs->queue_index],
+                (long long)*userq->wptr_bo_map);
+   }
 
    *seq_no = userq->user_fence_seq_num;
    simple_mtx_unlock(&userq->lock);

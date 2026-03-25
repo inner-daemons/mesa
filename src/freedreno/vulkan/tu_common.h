@@ -91,7 +91,7 @@
 #define MAX_DYNAMIC_STORAGE_BUFFERS 8
 #define MAX_DYNAMIC_BUFFERS_SIZE                                             \
    (MAX_DYNAMIC_UNIFORM_BUFFERS + 2 * MAX_DYNAMIC_STORAGE_BUFFERS) *         \
-   A6XX_TEX_CONST_DWORDS
+   FDL6_TEX_CONST_DWORDS
 
 #define TU_MAX_VIS_STREAMS 4
 
@@ -124,7 +124,6 @@
 #define MAX_INLINE_UBO_RANGE 256
 #define MAX_INLINE_UBOS 4
 
-#define A6XX_TEX_CONST_DWORDS 16
 #define A6XX_TEX_SAMP_DWORDS 4
 
 /* We sample the fragment density map on the CPU, so technically the
@@ -157,6 +156,8 @@ enum tu_predicate_bit {
    TU_PREDICATE_VTX_STATS_RUNNING = 3,
    TU_PREDICATE_VTX_STATS_NOT_RUNNING = 4,
    TU_PREDICATE_FIRST_TILE = 5,
+   TU_PREDICATE_FAST_STORE = 6,
+   TU_PREDICATE_NO_FAST_STORE = 7,
 };
 
 /* Onchip timestamp register layout. */
@@ -175,6 +176,11 @@ enum tu_onchip_addr {
    /* Registers 8-15 are defined by firmware to be split between BR and BV.
     * Each has their own copy.
     */
+};
+
+struct tu_rect2d_float {
+   float x_start, y_start;
+   float x_end, y_end;
 };
 
 
@@ -213,5 +219,14 @@ struct tu_suballoc_bo;
 struct tu_suballocator;
 struct tu_subpass;
 struct tu_u_trace_submission_data;
+
+/* Helper for iterating over layers of an attachment that handles both
+ * multiview and layered rendering cases.
+ */
+#define for_each_layer(layer, layer_mask, layers) \
+   for (uint32_t layer = 0; \
+        layer < ((layer_mask) ? (util_logbase2(layer_mask) + 1) : (layers)); \
+        layer++) \
+      if (!(layer_mask) || ((layer_mask) & BIT(layer)))
 
 #endif /* TU_COMMON_H */

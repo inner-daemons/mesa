@@ -21,12 +21,21 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
+#include "vk_shader_module.h"
 #include "v3dv_meta_common.h"
 
 #include "compiler/nir/nir_builder.h"
 #include "util/u_pack_color.h"
 #include "vk_common_entrypoints.h"
+
+#define V3D_VERSION 42
+#include "v3dv_format_table.h"
 
 static uint32_t
 meta_blit_key_hash(const void *key)

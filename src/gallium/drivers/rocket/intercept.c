@@ -261,7 +261,7 @@ handle_mem_create(struct rknpu_mem_create *args)
    context.bos[context.next_handle_id].obj_addr = args->obj_addr;
    context.bos[context.next_handle_id].dma_addr = args->dma_addr;
 
-   fprintf(stderr, "%s: dma_addr %llx\n", __func__, args->dma_addr);
+   fprintf(stderr, "%s: dma_addr %llx\n", __func__, (long long)args->dma_addr);
    context.next_handle_id++;
 
    return ret;
@@ -295,9 +295,15 @@ handle_action(struct rknpu_action *args)
    }
 }
 
-typedef int (*real_ioctl_t)(int fd, unsigned long request, ...);
+#ifdef __GLIBC__
+typedef unsigned long ioctl_req;
+#else
+typedef int ioctl_req; // per POSIX
+#endif
+
+typedef int (*real_ioctl_t)(int fd, ioctl_req request, ...);
 int
-ioctl(int fd, unsigned long request, ...)
+ioctl(int fd, ioctl_req request, ...)
 {
    int ret;
    uint32_t output_address = 0;

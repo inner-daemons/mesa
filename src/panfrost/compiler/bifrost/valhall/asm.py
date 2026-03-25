@@ -1,25 +1,7 @@
 #encoding=utf-8
 
 # Copyright (C) 2021 Collabora, Ltd.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice (including the next
-# paragraph) shall be included in all copies or substantial portions of the
-# Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-# IN THE SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 import argparse
 import os
@@ -94,10 +76,9 @@ def parse_int(s, minimum, maximum):
     return number
 
 def encode_source(op, fau):
-    if op[0] == '^':
-        die_if(op[1] != 'r', f"Expected register after discard {op}")
-        return parse_int(op[2:], 0, 63) | 0x40
-    elif op[0] == 'r':
+    if op[0] == 'r':
+        if (op[-1:] == '^'):
+            return parse_int(op[1:-1], 0, 63) | 0x40
         return parse_int(op[1:], 0, 63)
     elif op[0] == 'u':
         val = parse_int(op[1:], 0, 127)
@@ -233,7 +214,7 @@ def parse_asm(line):
 
         for mod in parts[1:]:
             # Encode the modifier
-            if mod in src.offset and src.bits[mod] == 1:
+            if mod in src.offset and src.mask[mod] == 0x1:
                 encoded |= (1 << src.offset[mod])
             elif src.halfswizzle and mod in enums[f'half_swizzles_{src.size}_bit'].bare_values:
                 die_if(swizzled, "Multiple swizzles specified")
@@ -333,12 +314,12 @@ def parse_asm(line):
     operands = operands[len(ins.immediates):]
 
     # Encode the operation itself
-    encoded |= (ins.opcode << 48)
-    encoded |= (ins.opcode2 << ins.secondary_shift)
+    for subcode in ins.opcode:
+        encoded |= (subcode.value << subcode.start)
 
     # Encode FAU page
     if fau.page:
-        encoded |= (fau.page << 57)
+        encoded |= (fau.page << ins.offset['fau_page'])
 
     # Encode modifiers
     has_flow = False
@@ -349,7 +330,7 @@ def parse_asm(line):
         if mod in enums['flow'].bare_values:
             die_if(has_flow, "Multiple flow control modifiers specified")
             has_flow = True
-            encoded |= (enums['flow'].bare_values.index(mod) << 59)
+            encoded |= (enums['flow'].bare_values.index(mod) << ins.offset['flow'])
         else:
             candidates = [c for c in ins.modifiers if mod in c.bare_values]
 

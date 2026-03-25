@@ -10,7 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "vk_alloc.h"
 #include "vk_descriptor_update_template.h"
 #include "vk_descriptors.h"
@@ -252,10 +252,16 @@ write_buffer_view_desc(struct panvk_descriptor_set *set,
    VK_FROM_HANDLE(panvk_buffer_view, view, bufferView);
 
 #if PAN_ARCH < 9
-   if (type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
-      write_desc(set, binding, elem, &view->descs.img_attrib_buf, NO_SUBDESC);
-   else
-      write_desc(set, binding, elem, &view->descs.tex, NO_SUBDESC);
+   struct {
+      struct mali_attribute_buffer_packed attr_buf_desc;
+      struct mali_attribute_packed attr_desc;
+      uint32_t pad[2];
+   } padded_desc = {
+      .attr_buf_desc = view->descs.attrib_buf,
+      .attr_desc = view->descs.attrib,
+   };
+
+   write_desc(set, binding, elem, &padded_desc, NO_SUBDESC);
 #else
    write_desc(set, binding, elem, &view->descs.buf, NO_SUBDESC);
 #endif
@@ -733,8 +739,10 @@ panvk_descriptor_set_copy(const VkCopyDescriptorSet *copy)
    const struct panvk_descriptor_set_binding_layout *src_binding_layout =
       &src_set->layout->bindings[copy->srcBinding];
 
-   const bool src_mutable = src_binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT;
-   const bool dst_mutable = dst_binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT;
+   ASSERTED const bool src_mutable =
+      src_binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT;
+   ASSERTED const bool dst_mutable =
+      dst_binding_layout->type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT;
    assert(dst_binding_layout->type == src_binding_layout->type || src_mutable || dst_mutable);
 
    switch (src_binding_layout->type) {

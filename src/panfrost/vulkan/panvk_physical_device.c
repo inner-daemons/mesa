@@ -14,6 +14,7 @@
 
 #include "util/disk_cache.h"
 #include "util/os_misc.h"
+#include "util/u_atomic.h"
 #include "git_sha1.h"
 
 #include "vk_android.h"
@@ -143,20 +144,20 @@ static void
 init_shader_caches(struct panvk_physical_device *device,
                    const struct panvk_instance *instance)
 {
-   struct mesa_sha1 sha_ctx;
-   _mesa_sha1_init(&sha_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-   _mesa_sha1_update(&sha_ctx, instance->driver_build_sha,
+   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                      sizeof(instance->driver_build_sha));
 
-   _mesa_sha1_update(&sha_ctx, &device->kmod.dev->props.gpu_id,
+   _mesa_blake3_update(&blake3_ctx, &device->kmod.dev->props.gpu_id,
                      sizeof(device->kmod.dev->props.gpu_id));
 
-   unsigned char sha[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&sha_ctx, sha);
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
 
-   STATIC_ASSERT(VK_UUID_SIZE <= SHA1_DIGEST_LENGTH);
-   memcpy(device->cache_uuid, sha, VK_UUID_SIZE);
+   STATIC_ASSERT(VK_UUID_SIZE <= BLAKE3_KEY_LEN);
+   memcpy(device->cache_uuid, blake3, VK_UUID_SIZE);
 
 #ifdef ENABLE_SHADER_CACHE
    char renderer[17];
@@ -164,8 +165,8 @@ init_shader_caches(struct panvk_physical_device *device,
                                device->kmod.dev->props.gpu_id);
    assert(len == sizeof(renderer) - 1);
 
-   char timestamp[SHA1_DIGEST_STRING_LENGTH];
-   _mesa_sha1_format(timestamp, instance->driver_build_sha);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, instance->driver_build_sha);
 
    const uint64_t driver_flags = 0;
    device->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
@@ -316,6 +317,11 @@ get_device_heaps(struct panvk_physical_device *device,
          host_cached_not_coherent_type;
    }
 
+   const uint64_t request_va =
+      PANVK_DEBUG(NO_EXTENDED_VA_RANGE) ? 1ull << 32 : 1ull << 48;
+   device->memory.max_supported_va =
+      pan_clamp_to_usable_va_range(device->kmod.dev, request_va);
+
    return VK_SUCCESS;
 }
 
@@ -431,10 +437,12 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    device->formats.all = pan_format_table(arch);
    device->formats.blendable = pan_blendable_format_table(arch);
 
-   memset(device->name, 0, sizeof(device->name));
-   sprintf(device->name, "%s", device->model->name);
+   unsigned core_id_range;
+   unsigned core_count =
+      pan_query_core_count(&device->kmod.dev->props, &core_id_range);
 
-   init_shader_caches(device, instance);
+   memset(device->name, 0, sizeof(device->name));
+   sprintf(device->name, "%s MC%u", device->model->name, core_count);
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -466,22 +474,25 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    panvk_arch_dispatch(arch, get_physical_device_features, instance,
                        device, &supported_features);
 
-   struct vk_properties properties;
-   panvk_arch_dispatch(arch, get_physical_device_properties, instance,
-                       device, &properties);
-
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &panvk_physical_device_entrypoints, true);
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &wsi_physical_device_entrypoints, false);
 
-   result = vk_physical_device_init(&device->vk, &instance->vk,
-                                    &supported_extensions, &supported_features,
-                                    &properties, &dispatch_table);
+   result =
+      vk_physical_device_init(&device->vk, &instance->vk, &supported_extensions,
+                              &supported_features, NULL, &dispatch_table);
 
    if (result != VK_SUCCESS)
       goto fail;
+
+   /* initialize disk cache after vk_physical_device_init */
+   init_shader_caches(device, instance);
+
+   /* pipeline binary props rely on disk cache init state */
+   panvk_arch_dispatch(arch, get_physical_device_properties, instance, device,
+                       &device->vk.properties);
 
    device->vk.supported_sync_types = device->sync_types;
 
@@ -609,6 +620,71 @@ panvk_GetPhysicalDeviceMemoryProperties2(
    for (uint32_t i = 0; i < physical_device->memory.type_count; i++) {
       pMemoryProperties->memoryProperties.memoryTypes[i] =
           physical_device->memory.types[i];
+   }
+
+   vk_foreach_struct(ext, pMemoryProperties->pNext) {
+      switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
+         VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = (void *)ext;
+
+         uint64_t used = p_atomic_read(&physical_device->memory.heap_used);
+         uint64_t heap_size = physical_device->memory.heaps[0].size;
+         uint64_t available;
+
+         if (!os_get_available_system_memory(&available))
+            available = heap_size;
+
+         /* From the Vulkan 1.3.278 spec:
+          *
+          *    "heapUsage is an array of VK_MAX_MEMORY_HEAPS VkDeviceSize
+          *    values in which memory usages are returned, with one element
+          *    for each memory heap. A heap’s usage is an estimate of how
+          *    much memory the process is currently using in that heap."
+          */
+         p->heapUsage[0] = used;
+
+         /* From the Vulkan 1.3.278 spec:
+          *
+          *    "heapBudget is an array of VK_MAX_MEMORY_HEAPS VkDeviceSize
+          *    values in which memory budgets are returned, with one
+          *    element for each memory heap. A heap’s budget is a rough
+          *    estimate of how much memory the process can allocate from
+          *    that heap before allocations may fail or cause performance
+          *    degradation. The budget includes any currently allocated
+          *    device memory."
+          *
+          * and
+          *
+          *    "The heapBudget value must be less than or equal to
+          *    VkMemoryHeap::size for each heap."
+          *
+          * available (queried above) is the total amount of free memory
+          * system-wide and does not include our allocations so we need
+          * to add that in.
+          */
+         uint64_t budget = MIN2(available + used, heap_size);
+
+         /* Set the budget at 90% of available to avoid thrashing */
+         p->heapBudget[0] = ROUND_DOWN_TO(budget * 9 / 10, 1 << 20);
+
+         /* From the Vulkan 1.3.278 spec:
+          *
+          *    "The heapBudget and heapUsage values must be zero for array
+          *    elements greater than or equal to
+          *    VkPhysicalDeviceMemoryProperties::memoryHeapCount. The
+          *    heapBudget value must be non-zero for array elements less than
+          *    VkPhysicalDeviceMemoryProperties::memoryHeapCount."
+          */
+         for (unsigned i = 1; i < VK_MAX_MEMORY_HEAPS; i++) {
+            p->heapBudget[i] = 0;
+            p->heapUsage[i] = 0;
+         }
+         break;
+      }
+      default:
+         vk_debug_ignored_stype(ext->sType);
+         break;
+      }
    }
 }
 
@@ -1417,7 +1493,16 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
          physical_device, base_info->format, usage, base_info->type,
          base_info->tiling, base_info->flags);
       hic_props->optimalDeviceAccess = !can_use_afbc;
-      hic_props->identicalMemoryLayout = !can_use_afbc;
+
+      /* FIXME: we only support host transfer with certain modifiers and for now
+       * there's no easy way to know whether the presence of HOST_TRANSFER will
+       * be the thing that causes the modifier to be filtered out, and thus
+       * causing a difference in memory layout.
+       *
+       * See https://gitlab.freedesktop.org/panfrost/mesa/-/issues/281 for
+       * details.
+       */
+      hic_props->identicalMemoryLayout = false;
    }
 
    const struct vk_format_ycbcr_info *ycbcr_info =

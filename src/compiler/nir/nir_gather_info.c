@@ -420,7 +420,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    uint16_t slot_mask_16bit = 0;
    bool is_patch_special = false;
 
-   if (nir_intrinsic_infos[instr->intrinsic].index_map[NIR_INTRINSIC_IO_SEMANTICS] > 0) {
+   if (nir_intrinsic_has_io_semantics(instr)) {
       nir_io_semantics semantics = nir_intrinsic_io_semantics(instr);
 
       is_patch_special = semantics.location == VARYING_SLOT_TESS_LEVEL_INNER ||
@@ -687,11 +687,6 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
          shader->info.fs.accesses_pixel_local_storage = true;
       break;
 
-   case nir_intrinsic_load_color0:
-   case nir_intrinsic_load_color1:
-      shader->info.inputs_read |=
-         BITFIELD64_BIT(VARYING_SLOT_COL0 << (instr->intrinsic == nir_intrinsic_load_color1));
-      FALLTHROUGH;
    case nir_intrinsic_load_subgroup_size:
    case nir_intrinsic_load_subgroup_invocation:
    case nir_intrinsic_load_subgroup_eq_mask:
@@ -855,6 +850,23 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
       break;
 
+   case nir_intrinsic_load_tile_pan:
+   case nir_intrinsic_load_tile_res_pan: {
+      const nir_io_semantics io = nir_intrinsic_io_semantics(instr);
+      shader->info.outputs_read |=
+         BITFIELD64_RANGE(io.location, io.num_slots);
+      break;
+   }
+
+   case nir_intrinsic_blend_pan:
+   case nir_intrinsic_blend2_pan:
+   case nir_intrinsic_store_tile_pan: {
+      const nir_io_semantics io = nir_intrinsic_io_semantics(instr);
+      shader->info.outputs_written |=
+         BITFIELD64_RANGE(io.location, io.num_slots);
+      break;
+   }
+
    case nir_intrinsic_demote_samples:
       shader->info.fs.uses_discard = true;
       break;
@@ -907,6 +919,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
           instr->intrinsic == nir_intrinsic_bindless_image_levels ||
           instr->intrinsic == nir_intrinsic_bindless_image_size ||
           instr->intrinsic == nir_intrinsic_bindless_image_samples ||
+          instr->intrinsic == nir_intrinsic_get_ubo_size ||
           instr->intrinsic == nir_intrinsic_get_ssbo_size)
          shader->info.uses_resource_info_query = true;
       break;

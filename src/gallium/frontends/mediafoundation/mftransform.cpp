@@ -22,13 +22,13 @@
  */
 
 #include <numeric>
+#include "gallium/drivers/d3d12/d3d12_interop_public.h"
 #include "d3d12_suballoc_mediabuffer.h"
 #include "dpb_buffer_manager.h"
 #include "hmft_entrypoints.h"
 #include "mfbufferhelp.h"
 #include "mfpipeinterop.h"
 #include "wpptrace.h"
-#include "gallium/drivers/d3d12/d3d12_interop_public.h"
 
 #include "mftransform.tmh"
 
@@ -888,23 +888,25 @@ CDX12EncHMFT::InitializeEncoder( pipe_video_profile videoProfile, UINT32 Width, 
          CHECKHR_GOTO( MF_E_OUT_OF_RANGE, done );
       }
 
-      // Please note in scenarios (e.g LTR or SVC) the backend may need to keep track of more references
-      // than the m_uiMaxNumRefFrame, since the references may be more in the past (up to 16, 8 frames max before
-      // depending on the codec)
-      // TODO: If we know at this point that we're not using LTR nor SVC we can set max_references to
-      // m_uiMaxNumRefFrame and use less ram, but not sure how would this work with codecapi reconfigurations/dynamic
-      // LTR/SVC requests
-
       // max_references is the number of previous submitted frame recon pics the frontend reference
       // pic trackers will keep track of and can be indexed by current frame submissions by from the L0/L1 reference lists
 
-      UINT32 uiMaxNumRefFrame = GetMaxReferences( Width, Height );
-      // if user sets m_uiMaxNumRefFrame, use that to limit
-      if( m_bMaxNumRefFrameSet )
+      // if user didn't set max reference, try to set a reasonable amount
+      if( !m_bMaxNumRefFrameSet )
       {
-         uiMaxNumRefFrame = std::min( uiMaxNumRefFrame, m_uiMaxNumRefFrame );
+         UINT32 uiMaxNumRefFrame = GetMaxReferences( Width, Height );
+         UINT32 uiEstimatedRefFrame = 1 /*current frame*/ + 1 /* slack */ + m_uiMaxLongTermReferences;
+         if( m_uiLayerCount > 1 )
+         {
+            uiEstimatedRefFrame += ( m_uiLayerCount - 1 );
+         }
+         if( uiEstimatedRefFrame > uiMaxNumRefFrame )
+         {
+            CHECKHR_GOTO( E_INVALIDARG, done );
+         }
+         MFE_INFO( "[dx12 hmft 0x%p] HMFT adjusted max_references from %u to %u", this, uiMaxNumRefFrame, uiEstimatedRefFrame );
+         m_uiMaxNumRefFrame = uiEstimatedRefFrame;   // update CodecAPI value.
       }
-      m_uiMaxNumRefFrame = uiMaxNumRefFrame;   // update CodecAPI value.
 
       encoderSettings.profile = videoProfile;
       encoderSettings.level = m_uiLevel;
@@ -1183,16 +1185,19 @@ CDX12EncHMFT::ConfigureAsyncStatsMetadataOutputSampleAttributes( IMFSample *pSam
    // releases the MF sample, the d3d12resource will be returned back to the pool
    if( m_uiVideoOutputQPMapBlockSize && pPipeResourceQPMapStats != nullptr )
    {
-      CHECKHR_GOTO(
-         m_spQPMapStatsBufferPool->AttachPipeResourceAsSampleExtension( pPipeResourceQPMapStats, pSyncObjectQueue, pSample ),
-         done );
+      CHECKHR_GOTO( m_spQPMapStatsBufferPool->AttachPipeResourceAsSampleExtension( m_pPipeContext,
+                                                                                   pPipeResourceQPMapStats,
+                                                                                   pSyncObjectQueue,
+                                                                                   pSample ),
+                    done );
    }
 
    // Conditionally attach output bits used map (d3d12resource), tracking will be added to the d3d12resource and when
    // the app releases the MF sample, the d3d12resource will be returned back to the pool
    if( m_uiVideoOutputBitsUsedMapBlockSize && pPipeResourceRCBitAllocMapStats != nullptr )
    {
-      CHECKHR_GOTO( m_spBitsUsedStatsBufferPool->AttachPipeResourceAsSampleExtension( pPipeResourceRCBitAllocMapStats,
+      CHECKHR_GOTO( m_spBitsUsedStatsBufferPool->AttachPipeResourceAsSampleExtension( m_pPipeContext,
+                                                                                      pPipeResourceRCBitAllocMapStats,
                                                                                       pSyncObjectQueue,
                                                                                       pSample ),
                     done );
@@ -1202,9 +1207,11 @@ CDX12EncHMFT::ConfigureAsyncStatsMetadataOutputSampleAttributes( IMFSample *pSam
    // releases the MF sample, the d3d12resource will be returned back to the pool
    if( m_uiVideoSatdMapBlockSize && pPipeResourceSATDMapStats != nullptr )
    {
-      CHECKHR_GOTO(
-         m_spSatdStatsBufferPool->AttachPipeResourceAsSampleExtension( pPipeResourceSATDMapStats, pSyncObjectQueue, pSample ),
-         done );
+      CHECKHR_GOTO( m_spSatdStatsBufferPool->AttachPipeResourceAsSampleExtension( m_pPipeContext,
+                                                                                  pPipeResourceSATDMapStats,
+                                                                                  pSyncObjectQueue,
+                                                                                  pSample ),
+                    done );
    }
 
    // Conditionally attach reconstructed picture copy (d3d12resource), gated by the completion fence
@@ -1220,7 +1227,7 @@ CDX12EncHMFT::ConfigureAsyncStatsMetadataOutputSampleAttributes( IMFSample *pSam
                                                               pPipeResourceReconstructedPicture,
                                                               PipeResourceReconstructedPictureSubresource,
                                                               pSyncObjectQueue,
-                                                              MFSampleExtension_VideoEncodeReconstructedPicture,
+                                                              MFSampleExtension_VideoEncodeD3D12ReconstructedPicture,
                                                               pSample ),
                        done );
       }
@@ -1230,7 +1237,8 @@ CDX12EncHMFT::ConfigureAsyncStatsMetadataOutputSampleAttributes( IMFSample *pSam
          assert( pPipeResourceReconstructedPicture );
          assert( spReconstructedPictureCompletionFence );   // Copy completion fence must be valid in this mode
          pSyncObjectQueue->Wait( spReconstructedPictureCompletionFence.Get(), ReconstructedPictureCompletionFenceValue );
-         CHECKHR_GOTO( m_spReconstructedPictureBufferPool->AttachPipeResourceAsSampleExtension( pPipeResourceReconstructedPicture,
+         CHECKHR_GOTO( m_spReconstructedPictureBufferPool->AttachPipeResourceAsSampleExtension( m_pPipeContext,
+                                                                                                pPipeResourceReconstructedPicture,
                                                                                                 pSyncObjectQueue,
                                                                                                 pSample ),
                        done );
@@ -1336,7 +1344,7 @@ CDX12EncHMFT::FinalizeAndEmitOutputSample( LPDX12EncodeContext pDX12EncodeContex
    // Check if codec units are non-contiguous in memory
    // If they are not contiguous, we need to copy them to a contiguous buffer
    // to match the reported nalu length information
-   assert (CodecUnitMetadataCount > 0);
+   assert( CodecUnitMetadataCount > 0 );
    bool bNonContiguousNALs = false;
    for( unsigned i = 0; i < CodecUnitMetadataCount - 1; i++ )
    {
@@ -1344,9 +1352,9 @@ CDX12EncHMFT::FinalizeAndEmitOutputSample( LPDX12EncodeContext pDX12EncodeContex
       {
          bNonContiguousNALs = true;
          debug_printf( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - Non-contiguous codec unit %i detected, "
-                        "performing copy into a contiguous buffer for MFT output\n",
-                        this,
-                        i );
+                       "performing copy into a contiguous buffer for MFT output\n",
+                       this,
+                       i );
       }
    }
 
@@ -1506,8 +1514,9 @@ CDX12EncHMFT::xThreadProc( void *pCtx )
          HANDLE fence_handle = (HANDLE) pThis->m_pPipeContext->screen->fence_get_win32_handle( pThis->m_pPipeContext->screen,
                                                                                                pDX12EncodeContext->pAsyncFence,
                                                                                                &ResolveStatsCompletionFenceValue );
-         if (!fence_handle ||
-            FAILED(pThis->m_spDevice->OpenSharedHandle(fence_handle, IID_PPV_ARGS(pDX12EncodeContext->spAsyncFence.ReleaseAndGetAddressOf()))))
+         if( !fence_handle || FAILED( pThis->m_spDevice->OpenSharedHandle(
+                                 fence_handle,
+                                 IID_PPV_ARGS( pDX12EncodeContext->spAsyncFence.ReleaseAndGetAddressOf() ) ) ) )
          {
             debug_printf( "[dx12 hmft 0x%p] Failed to open frame pAsyncFence\n", pThis );
             MFE_ERROR( "[dx12 hmft 0x%p] Failed to open frame pAsyncFence", pThis );
@@ -1892,7 +1901,10 @@ CDX12EncHMFT::xThreadProc( void *pCtx )
             MFCreateSample( &spOutputSample );
 
             if( metadata.encode_result & PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_MAX_FRAME_SIZE_OVERFLOW )
+            {
                debug_printf( "[dx12 hmft 0x%p] PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_MAX_FRAME_SIZE_OVERFLOW set\n", pThis );
+               MFE_WARNING( "[dx12 hmft 0x%p] PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_MAX_FRAME_SIZE_OVERFLOW set", pThis );
+            }
 
             // Set encoding quality metrics (only available after get_feedback on full frame encode)
             debug_printf( "[dx12 hmft 0x%p] Frame AverageQP: %d\n", pThis, metadata.average_frame_qp );
@@ -1948,6 +1960,7 @@ CDX12EncHMFT::xThreadProc( void *pCtx )
       if( !pThis->m_bLowLatency && !pThis->m_bFlushing && !pThis->m_bDraining )
       {
          pThis->m_dwNeedInputCount++;
+         HMFT_ETW_EVENT_INFO( "METransformNeedInput", pThis );
          HRESULT hr = pThis->QueueEvent( METransformNeedInput, GUID_NULL, S_OK, nullptr );
          if( FAILED( hr ) )
          {
@@ -2418,6 +2431,7 @@ CDX12EncHMFT::ProcessMessage( MFT_MESSAGE_TYPE eMessage, ULONG_PTR ulParam )
          m_bStreaming = true;
          m_bDraining = false;
          m_bFlushing = false;
+         HMFT_ETW_EVENT_INFO( "METransformNeedInput", this );
          CHECKHR_GOTO( QueueEvent( METransformNeedInput, GUID_NULL, S_OK, nullptr ), done );
          m_dwNeedInputCount++;
          break;
@@ -2621,19 +2635,20 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
          if( !m_bLowLatency )
          {
             debug_printf( "[dx12 hmft 0x%p] Zero copy read only reconstructed picture is ONLY supported in low latency mode\n",
-                           this );
+                          this );
             assert( m_bLowLatency );
             CHECKHR_GOTO( E_FAIL, done );
          }
 
          // Get read-only handle directly from the video buffer
          struct d3d12_interop_video_buffer_associated_data *associated_data =
-               static_cast<struct d3d12_interop_video_buffer_associated_data *>( src_buffer->associated_data );
-         if(associated_data->get_read_only_resource &&
-            (!associated_data->get_read_only_resource( src_buffer,
+            static_cast<struct d3d12_interop_video_buffer_associated_data *>( src_buffer->associated_data );
+         if( associated_data->get_read_only_resource &&
+             ( !associated_data->get_read_only_resource( src_buffer,
                                                          m_pPipeContext,
                                                          &pDX12EncodeContext->pPipeResourceReconstructedPicture,
-                                                         &pDX12EncodeContext->PipeResourceReconstructedPictureSubresource ) || !pDX12EncodeContext->pPipeResourceReconstructedPicture) )
+                                                         &pDX12EncodeContext->PipeResourceReconstructedPictureSubresource ) ||
+               !pDX12EncodeContext->pPipeResourceReconstructedPicture ) )
          {
             debug_printf( "[dx12 hmft 0x%p] Failed to get read-only resource from reference video buffer\n", this );
          }
@@ -2664,8 +2679,7 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
          whandle.type = WINSYS_HANDLE_TYPE_D3D12_RES;
          whandle.modifier = 2;   // Expected by video_buffer_from_handle to place a pipe_resource in the pipe_video_buffer
          whandle.com_obj = (void *) pDX12EncodeContext->pPipeResourceReconstructedPicture;
-         struct pipe_video_buffer *dst_buffer =
-            m_pPipeContext->video_buffer_from_handle( m_pPipeContext, src_buffer, &whandle, 0 );
+         struct pipe_video_buffer *dst_buffer = m_pPipeContext->video_buffer_from_handle( m_pPipeContext, src_buffer, &whandle, 0 );
          assert( dst_buffer );
          pDX12EncodeContext->PipeResourceReconstructedPictureSubresource = 0;
 
@@ -2692,11 +2706,10 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
             &pDX12EncodeContext->ReconstructedPictureCompletionFenceValue );
          if( fence_handle )
          {
-            CHECKHR_GOTO(
-               m_spDevice->OpenSharedHandle(
-                  fence_handle,
-                  IID_PPV_ARGS( pDX12EncodeContext->spReconstructedPictureCompletionFence.ReleaseAndGetAddressOf() ) ),
-               done );
+            CHECKHR_GOTO( m_spDevice->OpenSharedHandle(
+                             fence_handle,
+                             IID_PPV_ARGS( pDX12EncodeContext->spReconstructedPictureCompletionFence.ReleaseAndGetAddressOf() ) ),
+                          done );
             CloseHandle( fence_handle );
          }
       }
@@ -2724,6 +2737,7 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
       if( queueSize < MFT_INPUT_QUEUE_DEPTH )
       {
          m_dwNeedInputCount++;
+         HMFT_ETW_EVENT_INFO( "METransformNeedInput", this );
          hr = QueueEvent( METransformNeedInput, GUID_NULL, S_OK, nullptr );
          if( FAILED( hr ) )
          {
@@ -2788,16 +2802,32 @@ CDX12EncHMFT::ProcessOutput( DWORD dwFlags, DWORD cOutputBufferCount, MFT_OUTPUT
 
    if( m_bLowLatency )
    {
+      bool sendNeedInput = true;
       // For low-latency, some callers (like RDP) require a ping-pong pattern of:
       // - METransformNeedInput
       // - METransformHaveOutput
       // So we want to say METransformNeedInput as part of ProcessOutput()
-      m_dwNeedInputCount++;
-      hr = QueueEvent( METransformNeedInput, GUID_NULL, S_OK, nullptr );
-      if( FAILED( hr ) )
+      if( m_uiSliceGenerationMode )
       {
-         m_dwNeedInputCount--;
-         goto done;
+         UINT32 isLastSlice = FALSE;
+         if( SUCCEEDED( pOutputSamples[0].pSample->GetUINT32( MFSampleExtension_LastSlice, &isLastSlice ) ) )
+         {
+            if (!isLastSlice)
+            {
+               sendNeedInput = false;
+            }
+         }
+      }
+      if( sendNeedInput )
+      {
+         m_dwNeedInputCount++;
+         HMFT_ETW_EVENT_INFO( "METransformNeedInput", this );
+         hr = QueueEvent( METransformNeedInput, GUID_NULL, S_OK, nullptr );
+         if( FAILED( hr ) )
+         {
+            m_dwNeedInputCount--;
+            goto done;
+         }
       }
    }
 

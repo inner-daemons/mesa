@@ -108,7 +108,7 @@ hash_alu_src(uint32_t hash, const nir_alu_src *src, unsigned num_components)
 static uint32_t
 hash_alu(uint32_t hash, const nir_alu_instr *instr)
 {
-   /* We explicitly don't hash instr->exact. */
+   /* We explicitly don't hash instr->fp_math_ctrl. */
    uint8_t flags = instr->no_signed_wrap |
                    instr->no_unsigned_wrap << 1;
    uint8_t v[8];
@@ -242,7 +242,7 @@ hash_intrinsic(uint32_t hash, const nir_intrinsic_instr *instr)
       hash = XXH32(v, sizeof(v), hash);
    }
 
-   hash = XXH32(instr->const_index, info->num_indices * sizeof(instr->const_index[0]), hash);
+   hash = XXH32(instr->const_index, info->num_index_slots * sizeof(instr->const_index[0]), hash);
 
    for (unsigned i = 0; i < nir_intrinsic_infos[instr->intrinsic].num_srcs; i++)
       hash = hash_src(hash, &instr->src[i]);
@@ -565,7 +565,7 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       if (alu1->op != alu2->op)
          return false;
 
-      /* We explicitly don't compare instr->exact. */
+      /* We explicitly don't compare instr->fp_math_ctrl. */
 
       if (alu1->no_signed_wrap != alu2->no_signed_wrap)
          return false;
@@ -747,7 +747,7 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
             return false;
       }
 
-      for (unsigned i = 0; i < info->num_indices; i++) {
+      for (unsigned i = 0; i < info->num_index_slots; i++) {
          if (intrinsic1->const_index[i] != intrinsic2->const_index[i])
             return false;
       }
@@ -755,6 +755,7 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       return true;
    }
    case nir_instr_type_call:
+   case nir_instr_type_cmat_call:
    case nir_instr_type_jump:
    case nir_instr_type_undef:
    default:
@@ -800,15 +801,12 @@ nir_instr_set_add_or_rewrite(struct set *instr_set, nir_instr *instr,
       nir_def *def = nir_instr_def(instr);
       nir_def *new_def = nir_instr_def(match);
 
-      /* It's safe to replace an exact instruction with an inexact one as
-       * long as we make it exact.  If we got here, the two instructions are
-       * exactly identical in every other way so, once we've set the exact
-       * bit, they are the same.
+      /* It's safe to replace an instruction with an one with different fp_math_ctrl as
+       * long as we take the fp_math_ctrl union. If we got here, the two instructions are
+       * exactly identical in every other way.
        */
-      if (instr->type == nir_instr_type_alu) {
-         nir_instr_as_alu(match)->exact |= nir_instr_as_alu(instr)->exact;
-         nir_instr_as_alu(match)->fp_fast_math |= nir_instr_as_alu(instr)->fp_fast_math;
-      }
+      if (instr->type == nir_instr_type_alu)
+         nir_instr_as_alu(match)->fp_math_ctrl |= nir_instr_as_alu(instr)->fp_math_ctrl;
 
       assert(!def == !new_def);
       if (def)

@@ -65,7 +65,7 @@ get_pipeline(struct radv_device *device, uint32_t samples_log2, VkPipeline *pipe
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = radv_meta_nir_build_fmask_copy_compute_shader(device, samples);
+   nir_shader *cs = radv_meta_nir_build_fmask_copy_compute_shader(samples);
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -177,7 +177,7 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
       return;
    }
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    const VkImageViewUsageCreateInfo src_iview_usage_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
